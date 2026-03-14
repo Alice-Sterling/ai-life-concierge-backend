@@ -1,0 +1,20 @@
+{
+  "name": "ai-life-concierge-backend",
+  "version": "1.0.0",
+  "description": "Core backend for Ai Life Concierge - Twilio WhatsApp, Claude, PostgreSQL",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "nodemailer": "^6.9.16",
+    "pg": "^8.13.0"
+  }
+}
