@@ -152,50 +152,38 @@ function escapeXml(s) {
 }
 
 app.post('/webhook', async (req, res) => {
-  const phoneNumber = req.body?.From || req.body?.from;
-  const messageBody = (req.body?.Body || req.body?.body || '').trim();
-
-  if (!phoneNumber || !messageBody) {
-    res.type('text/xml').status(400).send(twimlMessage('Please send a message with content.'));
-    return;
-  }
-
-  let user;
-  let isNewUser = false;
+  console.log('--- NEW MESSAGE RECEIVED ---');
+  console.log('From:', req.body.From);
+  console.log('Body:', req.body.Body);
 
   try {
-    user = await getUserByPhone(phoneNumber);
+    // 1. Database Check
+    console.log('Status: Checking Database...');
+    const userQuery = await pool.query('SELECT * FROM users WHERE phone_number = $1', [req.body.From]);
+    const user = userQuery.rows[0];
+    console.log('Status: Database User Found:', user ? 'Yes' : 'No, creating new...');
 
-    if (!user) {
-      user = await createNewUser(phoneNumber);
-      isNewUser = true;
-
-      await sendEmail({
-        to: NEW_LEAD_ALERT_EMAIL,
-        subject: '[ALC] New lead – Explorer signed up',
-        text: `New lead created from WhatsApp.\n\nPhone: ${phoneNumber}\nFirst message: ${messageBody}\nCreated at: ${new Date().toISOString()}`,
-      });
-    }
-
-    const tier = user.tier || 'lite';
-    const aiResponse = await getClaudeResponse(tier, messageBody);
-
-    await saveConversation(user.id, messageBody, aiResponse, {
-      from: phoneNumber,
-      tier,
-      isNewUser,
+    // 2. AI Request
+    console.log('Status: Sending to Claude AI...');
+    const msg = await anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 1024,
+      system: ELITE_TRIAGE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: req.body.Body }],
     });
 
-    await sendEmail({
-      to: REQUEST_SUMMARY_EMAIL,
-      subject: `[ALC] Request summary – ${phoneNumber}`,
-      text: `Phone: ${phoneNumber}\nTier: ${tier}\nMessage: ${messageBody}\n\nAI response:\n${aiResponse}\n\nTimestamp: ${new Date().toISOString()}`,
-    });
+    const aiResponse = msg.content[0].text;
+    console.log('Status: Claude Responded successfully!');
 
-    res.type('text/xml').send(twimlMessage(aiResponse));
+    // 3. Twilio Response
+    console.log('Status: Sending TwiML back to Twilio...');
+    res.type('text/xml');
+    res.send(`<Response><Message>${aiResponse}</Message></Response>`);
+    console.log('--- WEBHOOK COMPLETE ---');
   } catch (err) {
-    console.error('Webhook error:', err);
-    res.type('text/xml').status(500).send(twimlMessage('We encountered an issue. Our team has been notified.'));
+    console.error('!!! ERROR IN WEBHOOK !!!');
+    console.error(err.message);
+    res.status(500).send('Error');
   }
 });
 
