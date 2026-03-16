@@ -122,7 +122,7 @@ async function getClaudeResponse(userTier, userMessage) {
     : "USER_TIER is 'lite'. Follow the lite response rule (recommendation + link, then upsell).";
 
   const response = await anthropic.messages.create({
-    model: 'claude-3-5-sonnet-latest',
+    model: 'claude-3-haiku-20240307',
     max_tokens: 256,
     system: ELITE_TRIAGE_SYSTEM_PROMPT,
     messages: [
@@ -170,7 +170,7 @@ app.post('/webhook', async (req, res) => {
     // 2. AI Request
     console.log('Status: Sending to Claude AI...');
     const msg = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-latest',
+      model: 'claude-3-haiku-20240307',
       max_tokens: 1024,
       system: ELITE_TRIAGE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: req.body.Body }],
