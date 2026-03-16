@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenAI } = require('@google/genai');
 const nodemailer = require('nodemailer');
 
 const app = express();
@@ -16,6 +17,7 @@ const pool = new Pool({
 });
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `Role: You are the "Lead Triage Architect" for Ai Life Concierge (ALC). You are the digital gateway to the Sovereign Vault. Your goal is to provide elite, friction-free intelligence to high-net-worth individuals.
 
@@ -116,6 +118,65 @@ async function saveConversation(userId, messageBody, aiResponse, metadata = {}) 
   );
 }
 
+async function getChatHistory(userId) {
+  const result = await pool.query(
+    'SELECT message_body, ai_response FROM conversations WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 6',
+    [userId]
+  );
+
+  const history = [];
+  result.rows.reverse().forEach((row) => {
+    if (row?.message_body) {
+      history.push({ role: 'user', content: row.message_body });
+    }
+    if (row?.ai_response) {
+      history.push({ role: 'assistant', content: row.ai_response });
+    }
+  });
+  return history;
+}
+
+async function getHybridResponse(user, userMessage) {
+  const history = await getChatHistory(user.id);
+  const messages = [...history, { role: 'user', content: userMessage }];
+
+  // --- TRY CLAUDE FIRST ---
+  try {
+    console.log('Status: Attempting Claude 4.6...');
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      system: ELITE_TRIAGE_SYSTEM_PROMPT,
+      messages,
+    });
+    return msg.content[0].text;
+  } catch (claudeErr) {
+    console.error('Claude Failed. Error:', claudeErr.message);
+
+    // --- FAIL-SAFE: GEMINI ---
+    try {
+      console.log('Status: Switching to Gemini Fail-Safe...');
+      const geminiModel = googleAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+      const geminiHistory = history.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+
+      const chat = geminiModel.startChat({
+        history: geminiHistory,
+        systemInstruction: ELITE_TRIAGE_SYSTEM_PROMPT,
+      });
+
+      const result = await chat.sendMessage(userMessage);
+      return result.response.text();
+    } catch (geminiErr) {
+      console.error('Total Outage:', geminiErr.message);
+      return 'I have received your request, but my neural link is currently calibrating. A human architect will assist you shortly.';
+    }
+  }
+}
+
 async function getClaudeResponse(userTier, userMessage) {
   const tierInstruction = userTier === 'pro'
     ? "USER_TIER is 'pro'. Follow the pro response rule."
@@ -168,21 +229,16 @@ app.post('/webhook', async (req, res) => {
     console.log('Status: User identified as:', user.tier);
 
     // 2. AI Request
-    console.log('Status: Sending to Claude AI...');
-    const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: ELITE_TRIAGE_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: req.body.Body }],
-    });
+    console.log('Status: Sending to Hybrid AI...');
+    const aiResponse = await getHybridResponse(user, req.body.Body);
 
-    const aiResponse = msg.content[0].text;
-    console.log('Status: Claude Responded successfully!');
+    // SAVE TO MEMORY
+    await saveConversation(user.id, req.body.Body, aiResponse);
 
     // 3. Twilio Response
     console.log('Status: Sending TwiML back to Twilio...');
     res.type('text/xml');
-    res.send(`<Response><Message>${aiResponse}</Message></Response>`);
+    res.send(twimlMessage(aiResponse));
     console.log('--- WEBHOOK COMPLETE ---');
   } catch (err) {
     console.error('!!! ERROR IN WEBHOOK !!!');
