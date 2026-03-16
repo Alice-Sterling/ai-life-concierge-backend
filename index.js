@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
@@ -43,6 +45,20 @@ Constraint: Keep responses under 70 words. Be sharp. Be elite.`;
 
 const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
+
+async function runInitScript() {
+  const client = await pool.connect();
+  try {
+    const initPath = path.join(__dirname, 'init-db.sql');
+    const sql = fs.readFileSync(initPath, 'utf8');
+    await client.query(sql);
+    console.log('Database initialization script executed successfully.');
+  } catch (err) {
+    console.error('Error running database initialization script:', err);
+  } finally {
+    client.release();
+  }
+}
 
 function getEmailTransporter() {
   let config = {};
@@ -188,6 +204,9 @@ app.get('/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+(async () => {
+  await runInitScript();
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+})();
