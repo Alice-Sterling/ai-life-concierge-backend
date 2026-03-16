@@ -159,9 +159,13 @@ app.post('/webhook', async (req, res) => {
   try {
     // 1. Database Check
     console.log('Status: Checking Database...');
-    const userQuery = await pool.query('SELECT * FROM users WHERE phone_number = $1', [req.body.From]);
-    const user = userQuery.rows[0];
-    console.log('Status: Database User Found:', user ? 'Yes' : 'No, creating new...');
+    let user = await getUserByPhone(req.body.From);
+
+    if (!user) {
+      console.log('Status: New user detected. Creating Explorer profile...');
+      user = await createNewUser(req.body.From);
+    }
+    console.log('Status: User identified as:', user.tier);
 
     // 2. AI Request
     console.log('Status: Sending to Claude AI...');
@@ -191,10 +195,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ai-life-concierge' });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080; // Changed to 8080 for Railway
 (async () => {
-  await runInitScript();
-  app.listen(PORT, () => {
+  try {
+    await runInitScript();
+  } catch (dbErr) {
+    console.error('Database init failed, but starting server anyway:', dbErr.message);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}`);
   });
 })();
