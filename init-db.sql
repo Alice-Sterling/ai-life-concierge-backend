@@ -2,7 +2,11 @@
 -- Run this once against your database (e.g. Railway PostgreSQL)
 
 -- Tier enum for user subscription level
-CREATE TYPE user_tier AS ENUM ('lite', 'pro');
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_tier') THEN
+        CREATE TYPE user_tier AS ENUM ('lite', 'pro');
+    END IF;
+END $$;
 
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
