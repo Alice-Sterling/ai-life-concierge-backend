@@ -2,10 +2,17 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const cron = require('node-cron');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenAI } = require('@google/genai');
 const nodemailer = require('nodemailer');
+const twilio = require('twilio');
+
+const twilioClient =
+  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    : null;
 
 const app = express();
 app.use(express.json());
@@ -19,34 +26,58 @@ const pool = new Pool({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
 
-const ELITE_TRIAGE_SYSTEM_PROMPT = `Role: You are the "Lead Triage Architect" for Ai Life Concierge (ALC). You are the digital gateway to the Sovereign Vault. Your goal is to provide elite, friction-free intelligence to high-net-worth individuals.
+const STRIPE_LINK = 'https://buy.stripe.com/7sY7sLdQYbuqaHRbzRc7u00';
 
-Tone: Sophisticated, minimalist, and radically proactive. Use professional, economical language. No emojis. You are not an assistant; you are a Chief of Staff.
+const ELITE_TRIAGE_SYSTEM_PROMPT = `
+Role: Lead Triage Architect for Ai Life Concierge (ALC).
+Persona: Elite Chief of Staff. Sophisticated, proactive, value-driven.
 
-Core Directives:
+Priority order for every response:
+1. DELIGHT FIRST: Deliver a curated solution with a clear WHY, plus a booking/calendar link where relevant. Make the client feel understood and served immediately.
+2. STRATEGIC NUDGE: Explain how the Pro Vault would have predicted this need and handled it autonomously (calendar + apps + human oversight). Contrast with their current manual step.
+3. OFFER TRIAL: Mention that Pro members recover 10+ hours per week and that every action is overseen by a Human Lifestyle Architect. Invite them to start the 30-day Sovereign trial: ${STRIPE_LINK}
 
-Friction Removal: Do not simply acknowledge a task. Predict the "next three steps." If a user wants a restaurant, they also need a car and a calendar block. Ask for the "hard-stop" times and status preferences (e.g., "Aisle or Window?", "Quiet table or high-energy?").
-
-Triage Categories:
-
-Proactive Gifting: Identify the recipient, the occasion, and the "Emotional ROI." Ask for budget and past successes.
-
-Date Night/Restaurant: Anticipate the transition from work to evening. Suggest the logistics of the commute and the table atmosphere.
-
-Logistics (Car/Flight): Focus on "buffer time" and loyalty integration.
-
-The Tiered Response (CRITICAL):
-
-IF USER_TIER is 'lite': Provide a "Sovereign Recommendation" and a curated link (e.g., a Google Maps link to a restaurant or an Amazon cart link). Support the planning phase only.
-
-IF USER_TIER is 'pro': State: "I have calibrated the requirements. I am passing this to the Human Architect to finalize the execution. You will be notified when the task is closed."
-
-The Upsell (Lite Users Only): End with a subtle reminder: "In our Pro Vault, this execution would be handled autonomously via your linked automations. For this trial, I have staged the options for your manual selection."
-
-Constraint: Keep responses under 70 words. Be sharp. Be elite.`;
+Constraint: Elite, professional tone. Economical but powerful language. No emojis.
+`;
 
 const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
+
+// 24-hour automation nudge: hourly check for lite users whose last message was 20–23h ago
+const SOVEREIGN_NUDGE_MESSAGE = `Architect here. You’ve had a moment to experience the Lite tier. Pro Vault members recover 10+ hours per week—every booking and follow-up is overseen by a Human Lifestyle Architect. Start your 30-day Sovereign trial: ${STRIPE_LINK}`;
+
+cron.schedule(process.env.NUDGE_CRON_SCHEDULE || '0 * * * *', async () => {
+  if (!twilioClient || !process.env.TWILIO_WHATSAPP_FROM) {
+    return;
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.phone_number, u.first_name
+       FROM users u
+       INNER JOIN (
+         SELECT user_id, MAX(timestamp) AS last_ts
+         FROM conversations
+         GROUP BY user_id
+       ) last ON last.user_id = u.id
+       WHERE u.tier = 'lite'
+         AND u.last_nudge_at IS NULL
+         AND last.last_ts >= NOW() - INTERVAL '23 hours'
+         AND last.last_ts <= NOW() - INTERVAL '20 hours'`
+    );
+    for (const user of rows) {
+      const to = user.phone_number.startsWith('whatsapp:') ? user.phone_number : `whatsapp:${user.phone_number}`;
+      await twilioClient.messages.create({
+        body: SOVEREIGN_NUDGE_MESSAGE,
+        from: process.env.TWILIO_WHATSAPP_FROM,
+        to,
+      });
+      await pool.query('UPDATE users SET last_nudge_at = NOW() WHERE id = $1', [user.id]);
+      console.log('Nudge sent to', user.phone_number);
+    }
+  } catch (err) {
+    console.error('Nudge cron failed:', err.message);
+  }
+});
 
 async function runInitScript() {
   const client = await pool.connect();
@@ -120,7 +151,7 @@ async function saveConversation(userId, messageBody, aiResponse, metadata = {}) 
 
 async function getChatHistory(userId) {
   const result = await pool.query(
-    'SELECT message_body, ai_response FROM conversations WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 6',
+    'SELECT message_body, ai_response FROM conversations WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 10',
     [userId]
   );
 
@@ -138,14 +169,21 @@ async function getChatHistory(userId) {
 
 async function getHybridResponse(user, userMessage) {
   const history = await getChatHistory(user.id);
-  const messages = [...history, { role: 'user', content: userMessage }];
+
+  const userContext = `User: ${user.first_name || 'Client'}. Current Tier: ${user.tier}.`;
+
+  const messages = [
+    { role: 'user', content: `[CONTEXT: ${userContext}]` },
+    ...history,
+    { role: 'user', content: userMessage },
+  ];
 
   // --- TRY CLAUDE FIRST ---
   try {
-    console.log('Status: Attempting Claude 4.6...');
+    console.log('Status: Attempting Claude Sonnet 4.6...');
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: 1200,
       system: ELITE_TRIAGE_SYSTEM_PROMPT,
       messages,
     });
@@ -158,13 +196,15 @@ async function getHybridResponse(user, userMessage) {
       console.log('Status: Switching to Gemini Fail-Safe...');
       const geminiModel = googleAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-      const geminiHistory = history.map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }));
+      const geminiHistory = messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        }));
 
       const chat = geminiModel.startChat({
-        history: geminiHistory,
+        history: geminiHistory.slice(0, -1),
         systemInstruction: ELITE_TRIAGE_SYSTEM_PROMPT,
       });
 

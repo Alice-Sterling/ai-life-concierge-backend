@@ -8,7 +8,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
--- Users table
+-- Users table (user_tier ENUM and metadata on conversations ensured below)
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   first_name VARCHAR(255),
@@ -17,11 +17,23 @@ CREATE TABLE IF NOT EXISTS users (
   email VARCHAR(255),
   client_id VARCHAR(255) UNIQUE,
   tier user_tier NOT NULL DEFAULT 'lite',
+  last_nudge_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Add last_nudge_at if table already existed without it
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'last_nudge_at'
+  ) THEN
+    ALTER TABLE users ADD COLUMN last_nudge_at TIMESTAMPTZ;
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);
+CREATE INDEX IF NOT EXISTS idx_users_last_nudge_at ON users(last_nudge_at);
 
 -- Conversations table (message + AI response per exchange)
 CREATE TABLE IF NOT EXISTS conversations (
