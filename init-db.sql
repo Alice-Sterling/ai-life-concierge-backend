@@ -47,3 +47,32 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);
+
+-- Create the Black Book (Recommendations) Table
+CREATE TABLE IF NOT EXISTS recommendations (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT, -- e.g., 'Dining', 'Gifting', 'Services'
+    location TEXT,
+    booking_url TEXT,
+    description TEXT,
+    vibe_tags TEXT[] -- e.g., ARRAY['quiet', 'business', 'high-energy']
+);
+
+-- Ensure seed inserts remain idempotent
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recommendations_name_location ON recommendations(name, location);
+
+-- Add a GIN index to vibe_tags for ultra-fast array searching
+CREATE INDEX IF NOT EXISTS idx_recommendations_vibe_tags ON recommendations USING GIN (vibe_tags);
+
+-- Seed with your first Vetted Recommendation (Example)
+INSERT INTO recommendations (name, category, location, booking_url, description, vibe_tags)
+VALUES (
+    'Park Chinois',
+    'Dining',
+    'Mayfair',
+    'https://parkchinois.com/reservations/',
+    'Opulent 1930s Shanghai-style dining with live entertainment. Perfect for high-impact business dinners.',
+    ARRAY['high-energy', 'business', 'opulent']
+)
+ON CONFLICT (name, location) DO NOTHING;

@@ -6,15 +6,64 @@ const cron = require('node-cron');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenAI } = require('@google/genai');
+const { tavily } = require('@tavily/core');
 const nodemailer = require('nodemailer');
 const twilio = require('twilio');
+const Stripe = require('stripe');
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
+const tavilyClient = process.env.TAVILY_API_KEY ? tavily({ apiKey: process.env.TAVILY_API_KEY }) : null;
 const twilioClient =
   process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
     ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
     : null;
 
 const app = express();
+
+// Stripe webhook needs raw body for signature verification (must be before express.json())
+app.post(
+  '/stripe-webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!webhookSecret || !sig) {
+      res.status(400).send('Missing webhook secret or signature');
+      return;
+    }
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+      console.error('Stripe webhook signature verification failed:', err.message);
+      res.status(400).send(`Webhook Error: ${err.message}`);
+      return;
+    }
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const phone = session.metadata?.phone || null;
+      const email = session.metadata?.email || session.customer_email || session.customer_details?.email || null;
+      let user = null;
+      if (phone) {
+        const byPhone = await pool.query('SELECT id, phone_number, email FROM users WHERE phone_number = $1', [phone]);
+        user = byPhone.rows[0] || null;
+      }
+      if (!user && email) {
+        const byEmail = await pool.query('SELECT id, phone_number, email FROM users WHERE email = $1', [email]);
+        user = byEmail.rows[0] || null;
+      }
+      if (user) {
+        await pool.query('UPDATE users SET tier = $1 WHERE id = $2', ['pro', user.id]);
+        const identifier = user.phone_number || user.email || user.id;
+        console.log(`User [${identifier}] upgraded to PRO tier.`);
+      }
+      res.json({ received: true });
+      return;
+    }
+    res.json({ received: true });
+  }
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -26,16 +75,14 @@ const pool = new Pool({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
 
-const STRIPE_LINK = 'https://buy.stripe.com/7sY7sLdQYbuqaHRbzRc7u00';
-
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
-Persona: Elite Chief of Staff. Sophisticated, proactive, value-driven.
+Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven.
 
-Priority order for every response:
-1. DELIGHT FIRST: Deliver a curated solution with a clear WHY, plus a booking/calendar link where relevant. Make the client feel understood and served immediately.
-2. STRATEGIC NUDGE: Explain how the Pro Vault would have predicted this need and handled it autonomously (calendar + apps + human oversight). Contrast with their current manual step.
-3. OFFER TRIAL: Mention that Pro members recover 10+ hours per week and that every action is overseen by a Human Lifestyle Architect. Invite them to start the 30-day Sovereign trial: ${STRIPE_LINK}
+Operating logic:
+- DELIGHT FIRST: Provide a curated recommendation with a verified link. Include a concise WHY and the next best action (booking/calendar link where relevant).
+- SOFT NUDGE (Lite Users): Describe Pro Vault benefits: predictive logistics, human-in-the-loop oversight, and ~10 hours recovered weekly.
+- CLOSING: "Would you like to activate a 30-day Concierge Pro Trial to automate this entire workflow?"
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
@@ -44,7 +91,7 @@ const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
 
 // 24-hour automation nudge: hourly check for lite users whose last message was 20–23h ago
-const SOVEREIGN_NUDGE_MESSAGE = `Architect here. You’ve had a moment to experience the Lite tier. Pro Vault members recover 10+ hours per week—every booking and follow-up is overseen by a Human Lifestyle Architect. Start your 30-day Sovereign trial: ${STRIPE_LINK}`;
+const SOVEREIGN_NUDGE_MESSAGE = `Architect here. I've been monitoring your request. I have a predictive strategy ready that would offload these logistics entirely. Would you like to activate a 30-day free trial of the Pro Vault to see the difference? Reply 'YES' to begin.`;
 
 cron.schedule(process.env.NUDGE_CRON_SCHEDULE || '0 * * * *', async () => {
   if (!twilioClient || !process.env.TWILIO_WHATSAPP_FROM) {
@@ -128,7 +175,7 @@ async function sendEmail({ to, subject, text }) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, created_at FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   return result.rows[0] || null;
@@ -136,7 +183,7 @@ async function getUserByPhone(phoneNumber) {
 
 async function createNewUser(phoneNumber) {
   const result = await pool.query(
-    `INSERT INTO users (phone_number, first_name, tier) VALUES ($1, $2, 'lite') RETURNING id, first_name, last_name, phone_number, email, client_id, tier, created_at`,
+    `INSERT INTO users (phone_number, first_name, tier) VALUES ($1, $2, 'lite') RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at`,
     [phoneNumber, 'Explorer']
   );
   return result.rows[0];
@@ -167,20 +214,9 @@ async function getChatHistory(userId) {
   return history;
 }
 
-async function getHybridResponse(user, userMessage) {
-  const history = await getChatHistory(user.id);
-
-  const userContext = `User: ${user.first_name || 'Client'}. Current Tier: ${user.tier}.`;
-
-  const messages = [
-    { role: 'user', content: `[CONTEXT: ${userContext}]` },
-    ...history,
-    { role: 'user', content: userMessage },
-  ];
-
+async function getHybridResponseFromMessages(messages, userMessage) {
   // --- TRY CLAUDE FIRST ---
   try {
-    console.log('Status: Attempting Claude Sonnet 4.6...');
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1200,
@@ -193,7 +229,6 @@ async function getHybridResponse(user, userMessage) {
 
     // --- FAIL-SAFE: GEMINI ---
     try {
-      console.log('Status: Switching to Gemini Fail-Safe...');
       const geminiModel = googleAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
       const geminiHistory = messages
@@ -215,6 +250,146 @@ async function getHybridResponse(user, userMessage) {
       return 'I have received your request, but my neural link is currently calibrating. A human architect will assist you shortly.';
     }
   }
+}
+
+async function searchRecommendations(query) {
+  const raw = String(query || '').trim();
+  const q = `%${raw}%`;
+
+  const stop = new Set([
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'i', 'in', 'is', 'it', 'me', 'my',
+    'of', 'on', 'or', 'our', 'please', 'the', 'their', 'to', 'us', 'we', 'with', 'you', 'your',
+  ]);
+
+  // Lightweight keyword extraction for vibe_tags matching.
+  const tokens = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t && t.length >= 3 && !stop.has(t));
+
+  const vibeTags = Array.from(new Set(tokens)).slice(0, 12);
+
+  // Weights are ordered as {D, C, B, A} in Postgres.
+  // Required: A=1.0 (name), B=0.4 (category/location), C=0.1 (description)
+  const weights = [0.0, 0.1, 0.4, 1.0];
+
+  const { rows } = await pool.query(
+    `
+    WITH ranked AS (
+      SELECT
+        r.*,
+        ts_rank_cd(
+          $3::real[],
+          (
+            setweight(to_tsvector('english', r.name), 'A') ||
+            setweight(to_tsvector('english', coalesce(r.category, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(r.location, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(r.description, '')), 'C')
+          ),
+          plainto_tsquery('english', $1)
+        ) AS db_rank,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM unnest(COALESCE(r.vibe_tags, ARRAY[]::text[])) AS vt(tag)
+          WHERE vt.tag = ANY($2::text[])
+        ), 0) AS tag_score
+      FROM recommendations r
+      WHERE
+        (
+          (
+            setweight(to_tsvector('english', r.name), 'A') ||
+            setweight(to_tsvector('english', coalesce(r.category, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(r.location, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(r.description, '')), 'C')
+          ) @@ plainto_tsquery('english', $1)
+        )
+        OR (COALESCE(r.vibe_tags, ARRAY[]::text[]) && $2::text[])
+        OR r.name ILIKE $4
+        OR r.category ILIKE $4
+        OR r.location ILIKE $4
+        OR r.description ILIKE $4
+    )
+    SELECT
+      id, name, category, location, booking_url, description, vibe_tags,
+      db_rank,
+      tag_score,
+      (db_rank + (tag_score * 0.05)) AS final_rank
+    FROM ranked
+    ORDER BY final_rank DESC, id DESC
+    LIMIT 5
+    `,
+    [raw, vibeTags, weights, q]
+  );
+
+  const best = rows?.[0]?.final_rank ?? 0;
+  const lowConfidence = best < 0.1;
+  return { rows, lowConfidence, bestRank: best };
+}
+
+// Tool: search Postgres vault first, live web second.
+async function search_vault_and_web(query) {
+  const vaultResult = await searchRecommendations(query);
+  const vault = vaultResult.rows;
+  let web = [];
+
+  if (tavilyClient) {
+    try {
+      const result = await tavilyClient.search({
+        query: String(query || ''),
+        max_results: 5,
+        include_answer: false,
+        include_images: false,
+      });
+      web = Array.isArray(result?.results) ? result.results : [];
+    } catch (err) {
+      console.error('Tavily search failed:', err.message);
+    }
+  }
+
+  return { vault, web, vaultLowConfidence: vaultResult.lowConfidence, vaultBestRank: vaultResult.bestRank };
+}
+
+async function runAgenticConcierge(user, userMessage) {
+  const history = await getChatHistory(user.id);
+  const userContext = `User: ${user.first_name || 'Client'}. Current Tier: ${user.tier}.`;
+
+  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(userMessage);
+
+  const vaultBlock = vault.length
+    ? vault
+        .map((r) => {
+          const tags = Array.isArray(r.vibe_tags) ? r.vibe_tags.join(', ') : '';
+          const rankBits = [];
+          if (typeof r.db_rank === 'number') rankBits.push(`db_rank=${r.db_rank.toFixed(3)}`);
+          if (typeof r.tag_score === 'number') rankBits.push(`tag_score=${r.tag_score}`);
+          if (typeof r.final_rank === 'number') rankBits.push(`final_rank=${r.final_rank.toFixed(3)}`);
+          return `- ${r.name}${r.location ? ` (${r.location})` : ''}${r.category ? ` — ${r.category}` : ''}\n  link: ${r.booking_url || 'N/A'}\n  vibe: ${tags || 'N/A'}\n  note: ${r.description || ''}${rankBits.length ? `\n  _rank: ${rankBits.join(', ')}` : ''}`;
+        })
+        .join('\n')
+    : '- No vault matches found.';
+
+  const webBlock = web.length
+    ? web
+        .slice(0, 5)
+        .map((r) => `- ${r.title || 'Result'}\n  link: ${r.url || 'N/A'}\n  snippet: ${r.content || ''}`)
+        .join('\n')
+    : '- No web results available.';
+
+  const confidenceNote = vaultLowConfidence
+    ? `\n\n[NOTE] Vault rank is low (${vaultBestRank.toFixed(3)}). Rely more heavily on the web results for verified links.`
+    : '';
+  const toolContext = `Vault recommendations:\n${vaultBlock}\n\nWeb results:\n${webBlock}${confidenceNote}`;
+
+  const messages = [
+    { role: 'user', content: `[CONTEXT: ${userContext}]` },
+    { role: 'user', content: `[TOOL: search_vault_and_web]\n${toolContext}` },
+    ...history,
+    { role: 'user', content: userMessage },
+  ];
+
+  return await getHybridResponseFromMessages(messages, userMessage);
 }
 
 async function getClaudeResponse(userTier, userMessage) {
@@ -268,12 +443,41 @@ app.post('/webhook', async (req, res) => {
     }
     console.log('Status: User identified as:', user.tier);
 
-    // 2. AI Request
-    console.log('Status: Sending to Hybrid AI...');
-    const aiResponse = await getHybridResponse(user, req.body.Body);
+    const incomingText = String(req.body.Body || '').trim();
+
+    // 2. Conversational upgrade flow
+    if (/\b(yes|trial)\b/i.test(incomingText)) {
+      const upgradeResponse =
+        "Understood. I am notifying the Human Architect to authenticate your Pro Concierge trial and begin your calendar integration. Would you please provide your email address? We will be in touch shortly to finalize the secure link.";
+
+      await sendEmail({
+        to: 'assist@ailifeconcierge.co.uk',
+        subject: `TRIAL REQUESTED: ${req.body.From}`,
+        text: `Trial requested.\n\nFrom: ${req.body.From}\nMessage: ${incomingText}\nTier: ${user.tier}\nTimestamp: ${new Date().toISOString()}`,
+      });
+
+      await saveConversation(user.id, incomingText, upgradeResponse);
+
+      res.type('text/xml');
+      res.send(twimlMessage(upgradeResponse));
+      return;
+    }
+
+    // 3. Agentic Concierge for standard messages
+    console.log('Status: Running Agentic Concierge...');
+    const aiResponse = await runAgenticConcierge(user, incomingText);
+
+    // 4. Pro tier handling: notify Human Architect to authenticate execution
+    if (user.tier === 'pro') {
+      await sendEmail({
+        to: 'assist@ailifeconcierge.co.uk',
+        subject: `PRO TASK: ${req.body.From}`,
+        text: `Pro task received.\n\nFrom: ${req.body.From}\nMessage: ${incomingText}\n\nAI response:\n${aiResponse}\n\nTimestamp: ${new Date().toISOString()}`,
+      });
+    }
 
     // SAVE TO MEMORY
-    await saveConversation(user.id, req.body.Body, aiResponse);
+    await saveConversation(user.id, incomingText, aiResponse);
 
     // 3. Twilio Response
     console.log('Status: Sending TwiML back to Twilio...');
