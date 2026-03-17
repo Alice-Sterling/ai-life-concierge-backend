@@ -11,7 +11,10 @@ const nodemailer = require('nodemailer');
 const twilio = require('twilio');
 const Stripe = require('stripe');
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+if (!process.env.STRIPE_SECRET_KEY) {
+  console.warn('Warning: Stripe key missing. Webhooks will not function.');
+}
 const tavilyClient = process.env.TAVILY_API_KEY ? tavily({ apiKey: process.env.TAVILY_API_KEY }) : null;
 const twilioClient =
   process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
@@ -25,6 +28,10 @@ app.post(
   '/stripe-webhook',
   express.raw({ type: 'application/json' }),
   async (req, res) => {
+    if (!stripe) {
+      res.status(503).send('Stripe not configured');
+      return;
+    }
     const sig = req.headers['stripe-signature'];
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
     if (!webhookSecret || !sig) {
