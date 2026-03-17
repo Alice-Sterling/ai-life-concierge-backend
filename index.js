@@ -97,6 +97,76 @@ Constraint: Elite, professional tone. Economical but powerful language. No emoji
 const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
 
+function generateClientId() {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let suffix = '';
+  for (let i = 0; i < 6; i += 1) {
+    suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return `Ai-${suffix}`;
+}
+
+async function ensureClientIdForUser(userId) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = generateClientId();
+    try {
+      const updated = await pool.query(
+        `UPDATE users
+         SET client_id = $1
+         WHERE id = $2 AND (client_id IS NULL OR client_id = '')
+         RETURNING id, client_id`,
+        [candidate, userId]
+      );
+      if (updated.rowCount > 0) return candidate;
+      const existing = await pool.query('SELECT client_id FROM users WHERE id = $1', [userId]);
+      return existing.rows[0]?.client_id || null;
+    } catch (err) {
+      // Likely unique violation; retry with a new ID
+    }
+  }
+  return null;
+}
+
+async function syncToAirtable({ client_id, phone_number, email, tier, last_message }) {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const tableName = process.env.AIRTABLE_TABLE_NAME;
+  if (!apiKey || !baseId || !tableName) return;
+
+  try {
+    const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`;
+    const payload = {
+      records: [
+        {
+          fields: {
+            client_id,
+            phone_number,
+            email,
+            tier,
+            last_message,
+          },
+        },
+      ],
+    };
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error('Airtable sync failed:', resp.status, text);
+    }
+  } catch (err) {
+    console.error('Airtable sync error:', err.message);
+  }
+}
+
 // 24-hour automation nudge: hourly check for lite users whose last message was 20–23h ago
 const SOVEREIGN_NUDGE_MESSAGE = `Architect here. I've been monitoring your request. I have a predictive strategy ready that would offload these logistics entirely. Would you like to activate a 30-day free trial of the Pro Vault to see the difference? Reply 'YES' to begin.`;
 
@@ -188,10 +258,12 @@ async function getUserByPhone(phoneNumber) {
   return result.rows[0] || null;
 }
 
-async function createNewUser(phoneNumber) {
+async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
-    `INSERT INTO users (phone_number, first_name, tier) VALUES ($1, $2, 'lite') RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at`,
-    [phoneNumber, 'Explorer']
+    `INSERT INTO users (phone_number, first_name, tier, client_id)
+     VALUES ($1, $2, 'lite', $3)
+     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at`,
+    [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   return result.rows[0];
 }
@@ -442,15 +514,35 @@ app.post('/webhook', async (req, res) => {
   try {
     // 1. Database Check
     console.log('Status: Checking Database...');
-    let user = await getUserByPhone(req.body.From);
+    const phoneNumber = req.body.From;
+    const profileName = req.body.ProfileName || req.body.profileName || null;
+
+    let user = await getUserByPhone(phoneNumber);
 
     if (!user) {
       console.log('Status: New user detected. Creating Explorer profile...');
-      user = await createNewUser(req.body.From);
+      user = await createNewUser(phoneNumber, profileName);
+    } else if (!user.first_name && profileName) {
+      await pool.query('UPDATE users SET first_name = $1 WHERE id = $2', [profileName, user.id]);
+      user.first_name = profileName;
+    }
+
+    if (!user.client_id) {
+      const cid = await ensureClientIdForUser(user.id);
+      if (cid) user.client_id = cid;
     }
     console.log('Status: User identified as:', user.tier);
 
     const incomingText = String(req.body.Body || '').trim();
+
+    // 2. PII-stripped Airtable sync
+    await syncToAirtable({
+      client_id: user.client_id,
+      phone_number: user.phone_number,
+      email: user.email || null,
+      tier: user.tier,
+      last_message: incomingText,
+    });
 
     // 2. Conversational upgrade flow
     if (/\b(yes|trial)\b/i.test(incomingText)) {
@@ -459,8 +551,8 @@ app.post('/webhook', async (req, res) => {
 
       await sendEmail({
         to: 'assist@ailifeconcierge.co.uk',
-        subject: `TRIAL REQUESTED: ${req.body.From}`,
-        text: `Trial requested.\n\nFrom: ${req.body.From}\nMessage: ${incomingText}\nTier: ${user.tier}\nTimestamp: ${new Date().toISOString()}`,
+        subject: `TRIAL REQUESTED: ${phoneNumber}`,
+        text: `Trial requested.\n\nFrom: ${phoneNumber}\nProfileName: ${profileName || ''}\nClientID: ${user.client_id || ''}\nMessage: ${incomingText}\nTier: ${user.tier}\nTimestamp: ${new Date().toISOString()}`,
       });
 
       await saveConversation(user.id, incomingText, upgradeResponse);
@@ -478,8 +570,8 @@ app.post('/webhook', async (req, res) => {
     if (user.tier === 'pro') {
       await sendEmail({
         to: 'assist@ailifeconcierge.co.uk',
-        subject: `PRO TASK: ${req.body.From}`,
-        text: `Pro task received.\n\nFrom: ${req.body.From}\nMessage: ${incomingText}\n\nAI response:\n${aiResponse}\n\nTimestamp: ${new Date().toISOString()}`,
+        subject: `PRO TASK: ${phoneNumber}`,
+        text: `Pro task received.\n\nFrom: ${phoneNumber}\nProfileName: ${profileName || ''}\nClientID: ${user.client_id || ''}\nMessage: ${incomingText}\n\nAI response:\n${aiResponse}\n\nTimestamp: ${new Date().toISOString()}`,
       });
     }
 
