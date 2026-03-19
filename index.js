@@ -607,6 +607,140 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+app.get('/portal', (req, res) => {
+  const waUrl =
+    'https://wa.me/441483694296?text=Vault%20access%20staged.%20I%20am%20ready%20to%20begin%20my%20Sovereign%20Audit%20with%20the%20Architect.';
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Golden Vault — Ai Life Concierge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: #000000;
+      color: #D4AF37;
+      font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100%;
+      padding: 1.5rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .vault {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      width: 100%;
+      max-width: 28rem;
+    }
+    .key-wrap {
+      cursor: pointer;
+      transform-origin: 50% 50%;
+      transition: transform 0.5s ease;
+      animation: vaultPulse 2.4s ease-in-out infinite;
+    }
+    .key-wrap:active { filter: brightness(1.08); }
+    .key-wrap.unlocked {
+      animation: none;
+      transform: rotate(90deg);
+    }
+    @keyframes vaultPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    .key-wrap svg { display: block; width: min(72vw, 280px); height: auto; filter: drop-shadow(0 0 24px rgba(212, 175, 55, 0.35)); }
+    .headline {
+      margin-top: 2.25rem;
+      text-align: center;
+      font-size: clamp(0.7rem, 2.8vw, 0.85rem);
+      font-weight: 400;
+      letter-spacing: 1.5px;
+      line-height: 1.65;
+      text-transform: uppercase;
+      max-width: 22rem;
+      opacity: 1;
+      transition: opacity 0.45s ease;
+    }
+    .headline.fade-out { opacity: 0; }
+    .headline.granted { color: #FFD700; }
+  </style>
+</head>
+<body>
+  <div class="vault">
+    <div class="key-wrap" id="vaultKey" role="button" tabindex="0" aria-label="Unlock vault">
+      <svg viewBox="0 0 200 320" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="gGold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#FFF8DC"/>
+            <stop offset="22%" style="stop-color:#D4AF37"/>
+            <stop offset="45%" style="stop-color:#FFD700"/>
+            <stop offset="62%" style="stop-color:#B8860B"/>
+            <stop offset="100%" style="stop-color:#8B6914"/>
+          </linearGradient>
+          <linearGradient id="gGoldDark" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" style="stop-color:#5C4813"/>
+            <stop offset="50%" style="stop-color:#C9A227"/>
+            <stop offset="100%" style="stop-color:#F0E68C"/>
+          </linearGradient>
+          <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="2" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <g filter="url(#softGlow)">
+          <path fill="url(#gGold)" stroke="#8B6914" stroke-width="0.8" d="M100 18c-28 0-50 22-50 50 0 18 9 34 23 43l-2 118c0 8 6 14 14 14h30c8 0 14-6 14-14l-2-118c14-9 23-25 23-43 0-28-22-50-50-50zm0 12c21 0 38 17 38 38 0 14-7 26-18 33l-1 124h-38l-1-124c-11-7-18-19-18-33 0-21 17-38 38-38z"/>
+          <ellipse cx="100" cy="68" rx="34" ry="34" fill="none" stroke="url(#gGoldDark)" stroke-width="2.5" opacity="0.85"/>
+          <path fill="url(#gGoldDark)" d="M100 42c-14 0-26 12-26 26s12 26 26 26 26-12 26-26-12-26-26-26zm0 10c9 0 16 7 16 16s-7 16-16 16-16-7-16-16 7-16 16-16z"/>
+          <rect x="94" y="128" width="12" height="118" rx="2" fill="url(#gGold)" stroke="#6B5310" stroke-width="0.6"/>
+          <path fill="url(#gGold)" stroke="#6B5310" stroke-width="0.6" d="M106 200h38v14h-12v18h12v14h-38v-46z"/>
+          <path fill="url(#gGoldDark)" opacity="0.35" d="M98 132h4v110h-4z"/>
+          <circle cx="72" cy="62" r="5" fill="#2a2208" stroke="#D4AF37" stroke-width="0.5"/>
+          <circle cx="128" cy="62" r="5" fill="#2a2208" stroke="#D4AF37" stroke-width="0.5"/>
+          <path fill="none" stroke="#B8860B" stroke-width="1" opacity="0.6" d="M100 24v88 M70 68h60"/>
+        </g>
+      </svg>
+    </div>
+    <p class="headline" id="vaultHeadline">RECLAIM YOUR FIRST 10 HOURS. UNLOCK NOW.</p>
+  </div>
+  <script>
+    (function () {
+      var key = document.getElementById('vaultKey');
+      var headline = document.getElementById('vaultHeadline');
+      var done = false;
+      var wa = ${JSON.stringify(waUrl)};
+      function unlock() {
+        if (done) return;
+        done = true;
+        try { if (navigator.vibrate) navigator.vibrate([40, 60]); } catch (e) {}
+        key.classList.add('unlocked');
+        headline.classList.add('fade-out');
+        setTimeout(function () {
+          headline.textContent = 'ACCESS GRANTED. REDIRECTING...';
+          headline.classList.add('granted');
+          headline.classList.remove('fade-out');
+        }, 420);
+        setTimeout(function () { window.location.href = wa; }, 900);
+      }
+      key.addEventListener('click', unlock);
+      key.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); unlock(); }
+      });
+    })();
+  </script>
+</body>
+</html>`);
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ai-life-concierge' });
 });
