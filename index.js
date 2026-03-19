@@ -609,131 +609,202 @@ app.post('/webhook', async (req, res) => {
 
 app.get('/portal', (req, res) => {
   const waUrl =
-    'https://wa.me/441483694296?text=Vault%20access%20staged.%20I%20am%20ready%20to%20begin%20my%20Sovereign%20Audit%20with%20the%20Architect.';
+    'https://wa.me/441483694296?text=' +
+    encodeURIComponent('Access Granted. Architect, I am ready to begin my Sovereign Audit.');
   res.type('html').send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Golden Vault — Ai Life Concierge</title>
+  <title>Sovereign Keyhole — Ai Life Concierge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; }
+    html, body { height: 100%; overflow: hidden; }
     body {
       background: #000000;
       color: #D4AF37;
       font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+      position: relative;
       min-height: 100%;
-      padding: 1.5rem;
       -webkit-tap-highlight-color: transparent;
+      transition: background-color 0.85s ease;
     }
-    .vault {
+    body.whiteout { background-color: #ffffff; }
+    .stage {
+      position: relative;
+      z-index: 2;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      flex: 1;
+      min-height: 100vh;
       width: 100%;
-      max-width: 28rem;
+      padding: 1.5rem;
+      transition: opacity 0.55s ease;
     }
-    .key-wrap {
+    .stage.dissolve { opacity: 0; }
+    .keyhole-wrap {
       cursor: pointer;
-      transform-origin: 50% 50%;
-      transition: transform 0.5s ease;
-      animation: vaultPulse 2.4s ease-in-out infinite;
+      outline: none;
     }
-    .key-wrap:active { filter: brightness(1.08); }
-    .key-wrap.unlocked {
-      animation: none;
-      transform: rotate(90deg);
+    .keyhole-wrap:focus-visible { box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.45); border-radius: 4px; }
+    .keyhole-wrap svg {
+      display: block;
+      width: min(64vw, 220px);
+      height: auto;
+      filter: drop-shadow(0 4px 20px rgba(0, 0, 0, 0.85));
     }
-    @keyframes vaultPulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.05); }
-    }
-    .key-wrap svg { display: block; width: min(72vw, 280px); height: auto; filter: drop-shadow(0 0 24px rgba(212, 175, 55, 0.35)); }
-    .headline {
-      margin-top: 2.25rem;
+    .tagline {
+      margin-top: 2rem;
       text-align: center;
-      font-size: clamp(0.7rem, 2.8vw, 0.85rem);
+      font-size: 1.1rem;
       font-weight: 400;
-      letter-spacing: 1.5px;
-      line-height: 1.65;
+      letter-spacing: 0.35em;
       text-transform: uppercase;
-      max-width: 22rem;
-      opacity: 1;
-      transition: opacity 0.45s ease;
+      opacity: 0.5;
+      max-width: 24rem;
+      line-height: 1.5;
+      transition: opacity 0.55s ease;
     }
-    .headline.fade-out { opacity: 0; }
-    .headline.granted { color: #FFD700; }
+    .tagline.dissolve { opacity: 0; }
+    #rippleHost {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .ripple-ring {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 0;
+      height: 0;
+      margin-left: 0;
+      margin-top: 0;
+      border: 2px solid #D4AF37;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      opacity: 0.85;
+      animation: sovereignRipple 1.15s ease-out forwards;
+    }
+    .ripple-ring.delay { animation-delay: 0.12s; opacity: 0.65; }
+    @keyframes sovereignRipple {
+      0% { width: 0; height: 0; opacity: 0.85; }
+      70% { opacity: 0.25; }
+      100% { width: 320vmax; height: 320vmax; opacity: 0; }
+    }
   </style>
 </head>
-<body>
-  <div class="vault">
-    <div class="key-wrap" id="vaultKey" role="button" tabindex="0" aria-label="Unlock vault">
-      <svg viewBox="0 0 200 320" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+<body id="sovereignBody">
+  <div id="rippleHost" aria-hidden="true"></div>
+  <div class="stage" id="sovereignStage">
+    <div class="keyhole-wrap" id="sovereignKeyhole" role="button" tabindex="0" aria-label="Enter Sovereign audit — opens WhatsApp">
+      <svg viewBox="0 0 140 220" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
         <defs>
-          <linearGradient id="gGold" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#FFF8DC"/>
-            <stop offset="22%" style="stop-color:#D4AF37"/>
-            <stop offset="45%" style="stop-color:#FFD700"/>
-            <stop offset="62%" style="stop-color:#B8860B"/>
-            <stop offset="100%" style="stop-color:#8B6914"/>
+          <linearGradient id="brassFace" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#C9A961"/>
+            <stop offset="28%" style="stop-color:#8B7355"/>
+            <stop offset="48%" style="stop-color:#B5A642"/>
+            <stop offset="62%" style="stop-color:#6E5C3D"/>
+            <stop offset="82%" style="stop-color:#A68B2D"/>
+            <stop offset="100%" style="stop-color:#4A3F2A"/>
           </linearGradient>
-          <linearGradient id="gGoldDark" x1="0%" y1="100%" x2="100%" y2="0%">
-            <stop offset="0%" style="stop-color:#5C4813"/>
-            <stop offset="50%" style="stop-color:#C9A227"/>
-            <stop offset="100%" style="stop-color:#F0E68C"/>
+          <linearGradient id="brassEdge" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" style="stop-color:#2A2318"/>
+            <stop offset="40%" style="stop-color:#7D6B45"/>
+            <stop offset="100%" style="stop-color:#D4C48A"/>
           </linearGradient>
-          <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="2" result="b"/>
-            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          <radialGradient id="plateShade" cx="45%" cy="35%" r="65%">
+            <stop offset="0%" style="stop-color:#000000;stop-opacity:0.55"/>
+            <stop offset="55%" style="stop-color:#000000;stop-opacity:0.12"/>
+            <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
+          </radialGradient>
+          <linearGradient id="tarnish1" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#3D4A38;stop-opacity:0.35"/>
+            <stop offset="50%" style="stop-color:#2A3228;stop-opacity:0.15"/>
+            <stop offset="100%" style="stop-color:#5C4A32;stop-opacity:0.25"/>
+          </linearGradient>
+          <filter id="keyholeGrain" x="-20%" y="-20%" width="140%" height="140%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" stitchTiles="stitch" result="noise"/>
+            <feColorMatrix type="saturate" values="0" in="noise" result="gray"/>
+            <feBlend in="SourceGraphic" in2="gray" mode="multiply" result="blend"/>
+            <feGaussianBlur in="blend" stdDeviation="0.25" result="soft"/>
+            <feMerge><feMergeNode in="soft"/></feMerge>
+          </filter>
+          <filter id="innerShadow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="b"/>
+            <feOffset dx="0" dy="2" in="b" result="o"/>
+            <feFlood flood-color="#000000" flood-opacity="0.65"/>
+            <feComposite in2="o" operator="in"/>
+            <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
           </filter>
         </defs>
-        <g filter="url(#softGlow)">
-          <path fill="url(#gGold)" stroke="#8B6914" stroke-width="0.8" d="M100 18c-28 0-50 22-50 50 0 18 9 34 23 43l-2 118c0 8 6 14 14 14h30c8 0 14-6 14-14l-2-118c14-9 23-25 23-43 0-28-22-50-50-50zm0 12c21 0 38 17 38 38 0 14-7 26-18 33l-1 124h-38l-1-124c-11-7-18-19-18-33 0-21 17-38 38-38z"/>
-          <ellipse cx="100" cy="68" rx="34" ry="34" fill="none" stroke="url(#gGoldDark)" stroke-width="2.5" opacity="0.85"/>
-          <path fill="url(#gGoldDark)" d="M100 42c-14 0-26 12-26 26s12 26 26 26 26-12 26-26-12-26-26-26zm0 10c9 0 16 7 16 16s-7 16-16 16-16-7-16-16 7-16 16-16z"/>
-          <rect x="94" y="128" width="12" height="118" rx="2" fill="url(#gGold)" stroke="#6B5310" stroke-width="0.6"/>
-          <path fill="url(#gGold)" stroke="#6B5310" stroke-width="0.6" d="M106 200h38v14h-12v18h12v14h-38v-46z"/>
-          <path fill="url(#gGoldDark)" opacity="0.35" d="M98 132h4v110h-4z"/>
-          <circle cx="72" cy="62" r="5" fill="#2a2208" stroke="#D4AF37" stroke-width="0.5"/>
-          <circle cx="128" cy="62" r="5" fill="#2a2208" stroke="#D4AF37" stroke-width="0.5"/>
-          <path fill="none" stroke="#B8860B" stroke-width="1" opacity="0.6" d="M100 24v88 M70 68h60"/>
+        <g filter="url(#keyholeGrain)">
+          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#brassFace)" stroke="url(#brassEdge)" stroke-width="2.2"/>
+          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#plateShade)"/>
+          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#tarnish1)"/>
+          <rect x="18" y="16" width="104" height="188" rx="10" fill="none" stroke="#1A1510" stroke-width="0.6" opacity="0.5"/>
+          <path d="M22 24h96M22 196h96" stroke="#000" stroke-opacity="0.25" stroke-width="0.5"/>
+        </g>
+        <g filter="url(#innerShadow)">
+          <path fill="#0D0C0A" stroke="#2A2418" stroke-width="1.2"
+            d="M70 52c-14 0-25 11-25 25 0 6 2 11 5 16v58c0 5 4 9 9 9h22c5 0 9-4 9-9V93c3-5 5-10 5-16 0-14-11-25-25-25z"/>
+          <ellipse cx="70" cy="52" rx="18" ry="18" fill="#050504" stroke="#3D3528" stroke-width="0.8"/>
+          <path d="M70 76 L58 118 L82 118 Z" fill="#080706" stroke="#2A2418" stroke-width="0.6"/>
+          <line x1="70" y1="64" x2="70" y2="108" stroke="#1A1814" stroke-width="1.2" opacity="0.4"/>
+        </g>
+        <g opacity="0.35" pointer-events="none">
+          <ellipse cx="48" cy="40" rx="10" ry="6" fill="#2A3D28" transform="rotate(-18 48 40)"/>
+          <ellipse cx="98" cy="168" rx="14" ry="8" fill="#3A3220" transform="rotate(12 98 168)"/>
         </g>
       </svg>
     </div>
-    <p class="headline" id="vaultHeadline">RECLAIM YOUR FIRST 10 HOURS. UNLOCK NOW.</p>
+    <p class="tagline" id="sovereignTagline">RECLAIM 10+ HOURS.</p>
   </div>
   <script>
     (function () {
-      var key = document.getElementById('vaultKey');
-      var headline = document.getElementById('vaultHeadline');
+      var keyhole = document.getElementById('sovereignKeyhole');
+      var stage = document.getElementById('sovereignStage');
+      var tagline = document.getElementById('sovereignTagline');
+      var body = document.getElementById('sovereignBody');
+      var host = document.getElementById('rippleHost');
       var done = false;
       var wa = ${JSON.stringify(waUrl)};
-      function unlock() {
+      function handover() {
         if (done) return;
         done = true;
-        try { if (navigator.vibrate) navigator.vibrate([40, 60]); } catch (e) {}
-        key.classList.add('unlocked');
-        headline.classList.add('fade-out');
+        try {
+          if (navigator.vibrate) navigator.vibrate([50, 80]);
+        } catch (err) {}
+        var r1 = document.createElement('div');
+        r1.className = 'ripple-ring';
+        var r2 = document.createElement('div');
+        r2.className = 'ripple-ring delay';
+        host.appendChild(r1);
+        host.appendChild(r2);
+        stage.classList.add('dissolve');
+        tagline.classList.add('dissolve');
         setTimeout(function () {
-          headline.textContent = 'ACCESS GRANTED. REDIRECTING...';
-          headline.classList.add('granted');
-          headline.classList.remove('fade-out');
-        }, 420);
-        setTimeout(function () { window.location.href = wa; }, 900);
+          body.classList.add('whiteout');
+        }, 280);
+        setTimeout(function () {
+          try {
+            window.location.href = wa;
+          } catch (e) {
+            window.location.assign(wa);
+          }
+        }, 1200);
       }
-      key.addEventListener('click', unlock);
-      key.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); unlock(); }
+      keyhole.addEventListener('click', handover);
+      keyhole.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handover();
+        }
       });
     })();
   </script>
