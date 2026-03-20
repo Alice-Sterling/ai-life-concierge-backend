@@ -610,200 +610,181 @@ app.post('/webhook', async (req, res) => {
 app.get('/portal', (req, res) => {
   const waUrl =
     'https://wa.me/441483694296?text=' +
-    encodeURIComponent('Access Granted. Architect, I am ready to begin my Sovereign Audit.');
+    encodeURIComponent(
+      "I'm ready to reclaim 10+ hours, but I'm just getting started. What can you help me with?"
+    );
   res.type('html').send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Sovereign Keyhole — Ai Life Concierge</title>
+  <title>Digital Invitation — Ai Life Concierge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; overflow: hidden; }
+    html, body { height: 100%; }
     body {
       background: #000000;
       color: #D4AF37;
       font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
-      position: relative;
       min-height: 100%;
       -webkit-tap-highlight-color: transparent;
-      transition: background-color 0.85s ease;
     }
-    body.whiteout { background-color: #ffffff; }
     .stage {
-      position: relative;
-      z-index: 2;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
       width: 100%;
-      padding: 1.5rem;
-      transition: opacity 0.55s ease;
+      padding: 1.5rem 1.25rem 2rem;
     }
-    .stage.dissolve { opacity: 0; }
-    .keyhole-wrap {
+    .envelope-scene {
+      perspective: 900px;
+      transform-style: preserve-3d;
+    }
+    .invite-float {
+      animation: inviteFloat 8s ease-in-out infinite;
+    }
+    @keyframes inviteFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-5px); }
+    }
+    .invitation-root.opened .invite-float { animation: none; }
+    .envelope-hit {
       cursor: pointer;
       outline: none;
-    }
-    .keyhole-wrap:focus-visible { box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.45); border-radius: 4px; }
-    .keyhole-wrap svg {
       display: block;
-      width: min(64vw, 220px);
+    }
+    .envelope-hit:focus-visible {
+      box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.45);
+      border-radius: 8px;
+    }
+    .envelope-hit svg {
+      display: block;
+      width: min(78vw, 300px);
       height: auto;
-      filter: drop-shadow(0 4px 20px rgba(0, 0, 0, 0.85));
+      filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.75));
     }
-    .tagline {
-      margin-top: 2rem;
+    .env-top-flap {
+      transform-origin: 160px 118px;
+      transition: transform 0.75s cubic-bezier(0.33, 1, 0.68, 1);
+    }
+    .invitation-root.opened .env-top-flap {
+      transform: rotate(-38deg);
+    }
+    .inner-glow {
+      opacity: 0;
+      transition: opacity 0.65s ease 0.12s;
+    }
+    .invitation-root.opened .inner-glow {
+      opacity: 1;
+    }
+    .footer-msg {
+      margin-top: 2.25rem;
       text-align: center;
-      font-size: 1.1rem;
+      font-size: clamp(0.65rem, 2.4vw, 0.8rem);
       font-weight: 400;
-      letter-spacing: 0.35em;
+      letter-spacing: 2px;
+      line-height: 1.6;
       text-transform: uppercase;
-      opacity: 0.5;
-      max-width: 24rem;
-      line-height: 1.5;
-      transition: opacity 0.55s ease;
+      color: #D4AF37;
+      max-width: 22rem;
+      opacity: 1;
+      transition: opacity 0.45s ease;
     }
-    .tagline.dissolve { opacity: 0; }
-    #rippleHost {
-      position: fixed;
-      inset: 0;
-      z-index: 1;
-      pointer-events: none;
-      overflow: hidden;
-    }
-    .ripple-ring {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 0;
-      height: 0;
-      margin-left: 0;
-      margin-top: 0;
-      border: 2px solid #D4AF37;
-      border-radius: 50%;
-      transform: translate(-50%, -50%);
-      opacity: 0.85;
-      animation: sovereignRipple 1.15s ease-out forwards;
-    }
-    .ripple-ring.delay { animation-delay: 0.12s; opacity: 0.65; }
-    @keyframes sovereignRipple {
-      0% { width: 0; height: 0; opacity: 0.85; }
-      70% { opacity: 0.25; }
-      100% { width: 320vmax; height: 320vmax; opacity: 0; }
-    }
+    .footer-msg.switching { opacity: 0; }
   </style>
 </head>
-<body id="sovereignBody">
-  <div id="rippleHost" aria-hidden="true"></div>
-  <div class="stage" id="sovereignStage">
-    <div class="keyhole-wrap" id="sovereignKeyhole" role="button" tabindex="0" aria-label="Enter Sovereign audit — opens WhatsApp">
-      <svg viewBox="0 0 140 220" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <defs>
-          <linearGradient id="brassFace" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#C9A961"/>
-            <stop offset="28%" style="stop-color:#8B7355"/>
-            <stop offset="48%" style="stop-color:#B5A642"/>
-            <stop offset="62%" style="stop-color:#6E5C3D"/>
-            <stop offset="82%" style="stop-color:#A68B2D"/>
-            <stop offset="100%" style="stop-color:#4A3F2A"/>
-          </linearGradient>
-          <linearGradient id="brassEdge" x1="0%" y1="100%" x2="100%" y2="0%">
-            <stop offset="0%" style="stop-color:#2A2318"/>
-            <stop offset="40%" style="stop-color:#7D6B45"/>
-            <stop offset="100%" style="stop-color:#D4C48A"/>
-          </linearGradient>
-          <radialGradient id="plateShade" cx="45%" cy="35%" r="65%">
-            <stop offset="0%" style="stop-color:#000000;stop-opacity:0.55"/>
-            <stop offset="55%" style="stop-color:#000000;stop-opacity:0.12"/>
-            <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
-          </radialGradient>
-          <linearGradient id="tarnish1" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#3D4A38;stop-opacity:0.35"/>
-            <stop offset="50%" style="stop-color:#2A3228;stop-opacity:0.15"/>
-            <stop offset="100%" style="stop-color:#5C4A32;stop-opacity:0.25"/>
-          </linearGradient>
-          <filter id="keyholeGrain" x="-20%" y="-20%" width="140%" height="140%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" stitchTiles="stitch" result="noise"/>
-            <feColorMatrix type="saturate" values="0" in="noise" result="gray"/>
-            <feBlend in="SourceGraphic" in2="gray" mode="multiply" result="blend"/>
-            <feGaussianBlur in="blend" stdDeviation="0.25" result="soft"/>
-            <feMerge><feMergeNode in="soft"/></feMerge>
-          </filter>
-          <filter id="innerShadow" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="b"/>
-            <feOffset dx="0" dy="2" in="b" result="o"/>
-            <feFlood flood-color="#000000" flood-opacity="0.65"/>
-            <feComposite in2="o" operator="in"/>
-            <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-          </filter>
-        </defs>
-        <g filter="url(#keyholeGrain)">
-          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#brassFace)" stroke="url(#brassEdge)" stroke-width="2.2"/>
-          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#plateShade)"/>
-          <rect x="10" y="8" width="120" height="204" rx="14" fill="url(#tarnish1)"/>
-          <rect x="18" y="16" width="104" height="188" rx="10" fill="none" stroke="#1A1510" stroke-width="0.6" opacity="0.5"/>
-          <path d="M22 24h96M22 196h96" stroke="#000" stroke-opacity="0.25" stroke-width="0.5"/>
-        </g>
-        <g filter="url(#innerShadow)">
-          <path fill="#0D0C0A" stroke="#2A2418" stroke-width="1.2"
-            d="M70 52c-14 0-25 11-25 25 0 6 2 11 5 16v58c0 5 4 9 9 9h22c5 0 9-4 9-9V93c3-5 5-10 5-16 0-14-11-25-25-25z"/>
-          <ellipse cx="70" cy="52" rx="18" ry="18" fill="#050504" stroke="#3D3528" stroke-width="0.8"/>
-          <path d="M70 76 L58 118 L82 118 Z" fill="#080706" stroke="#2A2418" stroke-width="0.6"/>
-          <line x1="70" y1="64" x2="70" y2="108" stroke="#1A1814" stroke-width="1.2" opacity="0.4"/>
-        </g>
-        <g opacity="0.35" pointer-events="none">
-          <ellipse cx="48" cy="40" rx="10" ry="6" fill="#2A3D28" transform="rotate(-18 48 40)"/>
-          <ellipse cx="98" cy="168" rx="14" ry="8" fill="#3A3220" transform="rotate(12 98 168)"/>
-        </g>
-      </svg>
+<body>
+  <div class="stage">
+    <div class="invitation-root" id="invitationRoot">
+      <div class="envelope-scene invite-float">
+        <div class="envelope-hit" id="envelopeBtn" role="button" tabindex="0" aria-label="Open invitation — continue to WhatsApp">
+          <svg viewBox="0 0 320 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <defs>
+              <linearGradient id="invCharcoal" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#2a2a2e"/>
+                <stop offset="45%" style="stop-color:#121214"/>
+                <stop offset="100%" style="stop-color:#0a0a0c"/>
+              </linearGradient>
+              <linearGradient id="invCharcoalSide" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" style="stop-color:#0d0d10"/>
+                <stop offset="100%" style="stop-color:#252528"/>
+              </linearGradient>
+              <radialGradient id="invInnerLight" cx="50%" cy="45%" r="55%">
+                <stop offset="0%" style="stop-color:#FFD700;stop-opacity:0.95"/>
+                <stop offset="35%" style="stop-color:#D4AF37;stop-opacity:0.55"/>
+                <stop offset="70%" style="stop-color:#8B6914;stop-opacity:0.2"/>
+                <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
+              </radialGradient>
+              <filter id="invGlowBlur" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="8" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <rect width="320" height="260" fill="#000000"/>
+            <path fill="url(#invCharcoal)" stroke="#D4AF37" stroke-width="1.8" stroke-linejoin="round"
+              d="M32 118 L160 118 L288 118 L288 228 Q288 238 278 238 L42 238 Q32 238 32 228 Z"/>
+            <g class="inner-glow" filter="url(#invGlowBlur)">
+              <ellipse cx="160" cy="132" rx="88" ry="58" fill="url(#invInnerLight)"/>
+            </g>
+            <path fill="url(#invCharcoalSide)" stroke="#D4AF37" stroke-width="1.4" stroke-linejoin="round" opacity="0.92"
+              d="M32 118 L160 200 L32 228 Z"/>
+            <path fill="url(#invCharcoalSide)" stroke="#D4AF37" stroke-width="1.4" stroke-linejoin="round" opacity="0.92"
+              d="M288 118 L160 200 L288 228 Z"/>
+            <path fill="#141416" stroke="#D4AF37" stroke-width="1.6" stroke-linejoin="round"
+              d="M32 228 L160 155 L288 228"/>
+            <g class="env-top-flap">
+              <path fill="url(#invCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
+                d="M32 118 L160 38 L288 118 Z"/>
+              <path d="M32 118 L160 38 L288 118" fill="none" stroke="#D4AF37" stroke-width="0.9" opacity="0.35"/>
+              <g transform="translate(160, 108)">
+                <circle r="28" fill="#161618" stroke="#D4AF37" stroke-width="2.2"/>
+                <circle r="22" fill="none" stroke="#B8860B" stroke-width="0.6" opacity="0.5"/>
+                <text x="0" y="8" text-anchor="middle" fill="#D4AF37" font-family="Instrument Serif, Georgia, serif" font-size="22" font-weight="600" letter-spacing="0.12em">AI</text>
+              </g>
+            </g>
+          </svg>
+        </div>
+      </div>
     </div>
-    <p class="tagline" id="sovereignTagline">RECLAIM 10+ HOURS.</p>
+    <p class="footer-msg" id="inviteFooter">YOUR INVITATION TO ACTIVATE AI LIFE CONCIERGE</p>
   </div>
   <script>
     (function () {
-      var keyhole = document.getElementById('sovereignKeyhole');
-      var stage = document.getElementById('sovereignStage');
-      var tagline = document.getElementById('sovereignTagline');
-      var body = document.getElementById('sovereignBody');
-      var host = document.getElementById('rippleHost');
+      var root = document.getElementById('invitationRoot');
+      var btn = document.getElementById('envelopeBtn');
+      var footer = document.getElementById('inviteFooter');
       var done = false;
       var wa = ${JSON.stringify(waUrl)};
-      function handover() {
+      function openInvitation() {
         if (done) return;
         done = true;
         try {
-          if (navigator.vibrate) navigator.vibrate([50, 80]);
-        } catch (err) {}
-        var r1 = document.createElement('div');
-        r1.className = 'ripple-ring';
-        var r2 = document.createElement('div');
-        r2.className = 'ripple-ring delay';
-        host.appendChild(r1);
-        host.appendChild(r2);
-        stage.classList.add('dissolve');
-        tagline.classList.add('dissolve');
+          if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+        } catch (e) {}
+        root.classList.add('opened');
+        footer.classList.add('switching');
         setTimeout(function () {
-          body.classList.add('whiteout');
-        }, 280);
+          footer.textContent = 'REDIRECTING TO THE ARCHITECT...';
+          footer.classList.remove('switching');
+        }, 380);
         setTimeout(function () {
           try {
             window.location.href = wa;
-          } catch (e) {
+          } catch (err) {
             window.location.assign(wa);
           }
-        }, 1200);
+        }, 1000);
       }
-      keyhole.addEventListener('click', handover);
-      keyhole.addEventListener('keydown', function (e) {
+      btn.addEventListener('click', openInvitation);
+      btn.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          handover();
+          openInvitation();
         }
       });
     })();
