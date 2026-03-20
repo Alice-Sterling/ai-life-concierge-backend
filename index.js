@@ -617,20 +617,24 @@ app.get('/portal', (req, res) => {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Digital Invitation — Ai Life Concierge</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Natural Opening — Ai Life Concierge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; }
+    html, body {
+      height: 100%;
+      min-height: 100%;
+      min-height: -webkit-fill-available;
+    }
     body {
       background: #000000;
       color: #D4AF37;
       font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
-      min-height: 100%;
       -webkit-tap-highlight-color: transparent;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
     .stage {
       display: flex;
@@ -638,21 +642,16 @@ app.get('/portal', (req, res) => {
       align-items: center;
       justify-content: center;
       min-height: 100vh;
+      min-height: 100dvh;
       width: 100%;
-      padding: 1.5rem 1.25rem 2rem;
+      padding: 1.25rem 1rem 2rem;
     }
-    .envelope-scene {
-      perspective: 900px;
+    .natural-scene {
+      perspective: 1200px;
+      -webkit-perspective: 1200px;
       transform-style: preserve-3d;
+      -webkit-transform-style: preserve-3d;
     }
-    .invite-float {
-      animation: inviteFloat 8s ease-in-out infinite;
-    }
-    @keyframes inviteFloat {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-5px); }
-    }
-    .invitation-root.opened .invite-float { animation: none; }
     .envelope-hit {
       cursor: pointer;
       outline: none;
@@ -662,105 +661,110 @@ app.get('/portal', (req, res) => {
       box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.45);
       border-radius: 8px;
     }
-    .envelope-hit svg {
+    .natural-svg {
       display: block;
-      width: min(78vw, 300px);
+      width: 60vw;
+      max-width: 380px;
       height: auto;
-      filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.75));
+      overflow: visible;
+      transform-style: preserve-3d;
+      -webkit-transform-style: preserve-3d;
+      filter: drop-shadow(0 14px 32px rgba(0, 0, 0, 0.8));
     }
-    .env-top-flap {
+    @media (min-width: 769px) {
+      .natural-svg { width: min(340px, 42vw); }
+    }
+    .natural-flap {
       transform-origin: 160px 118px;
-      transition: transform 0.75s cubic-bezier(0.33, 1, 0.68, 1);
+      transform: rotateX(0deg);
+      -webkit-transform: rotateX(0deg);
+      transition: transform 0.6s ease;
+      -webkit-transition: -webkit-transform 0.6s ease;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
     }
-    .invitation-root.opened .env-top-flap {
-      transform: rotate(-38deg);
+    .natural-root.opened .natural-flap {
+      transform: rotateX(180deg);
+      -webkit-transform: rotateX(180deg);
     }
-    .inner-glow {
-      opacity: 0;
-      transition: opacity 0.65s ease 0.12s;
+    .natural-letter {
+      transform: translateY(0);
+      transition: transform 0.45s ease 0.3s;
     }
-    .invitation-root.opened .inner-glow {
-      opacity: 1;
+    .natural-root.opened .natural-letter {
+      transform: translateY(-40px);
     }
     .footer-msg {
-      margin-top: 2.25rem;
+      margin-top: 2rem;
       text-align: center;
-      font-size: clamp(0.65rem, 2.4vw, 0.8rem);
-      font-weight: 400;
+      font-size: 1rem;
+      font-weight: 700;
       letter-spacing: 2px;
-      line-height: 1.6;
+      line-height: 1.45;
       text-transform: uppercase;
       color: #D4AF37;
-      max-width: 22rem;
+      max-width: 24rem;
+      padding: 0 0.5rem;
       opacity: 1;
-      transition: opacity 0.45s ease;
+      transition: opacity 0.4s ease;
+    }
+    @media (max-width: 768px) {
+      .footer-msg { font-size: 1.8rem; }
     }
     .footer-msg.switching { opacity: 0; }
   </style>
 </head>
 <body>
   <div class="stage">
-    <div class="invitation-root" id="invitationRoot">
-      <div class="envelope-scene invite-float">
-        <div class="envelope-hit" id="envelopeBtn" role="button" tabindex="0" aria-label="Open invitation — continue to WhatsApp">
-          <svg viewBox="0 0 320 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <div class="natural-root" id="naturalRoot">
+      <div class="natural-scene">
+        <div class="envelope-hit" id="envelopeBtn" role="button" tabindex="0" aria-label="Open envelope — continue to WhatsApp">
+          <svg class="natural-svg" viewBox="0 0 320 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <defs>
-              <linearGradient id="invCharcoal" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" style="stop-color:#2a2a2e"/>
-                <stop offset="45%" style="stop-color:#121214"/>
-                <stop offset="100%" style="stop-color:#0a0a0c"/>
+              <linearGradient id="natCharcoal" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#222"/>
+                <stop offset="100%" style="stop-color:#1a1a1a"/>
               </linearGradient>
-              <linearGradient id="invCharcoalSide" x1="0%" y1="100%" x2="100%" y2="0%">
-                <stop offset="0%" style="stop-color:#0d0d10"/>
-                <stop offset="100%" style="stop-color:#252528"/>
+              <linearGradient id="natSide" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" style="stop-color:#121212"/>
+                <stop offset="100%" style="stop-color:#1f1f1f"/>
               </linearGradient>
-              <radialGradient id="invInnerLight" cx="50%" cy="45%" r="55%">
-                <stop offset="0%" style="stop-color:#FFD700;stop-opacity:0.95"/>
-                <stop offset="35%" style="stop-color:#D4AF37;stop-opacity:0.55"/>
-                <stop offset="70%" style="stop-color:#8B6914;stop-opacity:0.2"/>
-                <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
-              </radialGradient>
-              <filter id="invGlowBlur" x="-50%" y="-50%" width="200%" height="200%">
-                <feGaussianBlur stdDeviation="8" result="b"/>
-                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
             </defs>
             <rect width="320" height="260" fill="#000000"/>
-            <path fill="url(#invCharcoal)" stroke="#D4AF37" stroke-width="1.8" stroke-linejoin="round"
+            <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.8" stroke-linejoin="round"
               d="M32 118 L160 118 L288 118 L288 228 Q288 238 278 238 L42 238 Q32 238 32 228 Z"/>
-            <g class="inner-glow" filter="url(#invGlowBlur)">
-              <ellipse cx="160" cy="132" rx="88" ry="58" fill="url(#invInnerLight)"/>
+            <g class="natural-letter">
+              <rect x="78" y="148" width="164" height="76" rx="3" fill="#141414" stroke="#D4AF37" stroke-width="1.15"/>
+              <line x1="98" y1="168" x2="222" y2="168" stroke="#D4AF37" stroke-width="0.35" opacity="0.45"/>
+              <line x1="98" y1="182" x2="198" y2="182" stroke="#D4AF37" stroke-width="0.35" opacity="0.35"/>
+              <line x1="98" y1="196" x2="210" y2="196" stroke="#D4AF37" stroke-width="0.35" opacity="0.3"/>
             </g>
-            <path fill="url(#invCharcoalSide)" stroke="#D4AF37" stroke-width="1.4" stroke-linejoin="round" opacity="0.92"
+            <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
               d="M32 118 L160 200 L32 228 Z"/>
-            <path fill="url(#invCharcoalSide)" stroke="#D4AF37" stroke-width="1.4" stroke-linejoin="round" opacity="0.92"
+            <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
               d="M288 118 L160 200 L288 228 Z"/>
-            <path fill="#141416" stroke="#D4AF37" stroke-width="1.6" stroke-linejoin="round"
+            <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.5" stroke-linejoin="round"
               d="M32 228 L160 155 L288 228"/>
-            <g class="env-top-flap">
-              <path fill="url(#invCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
+            <g class="natural-flap">
+              <path fill="url(#natCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
                 d="M32 118 L160 38 L288 118 Z"/>
-              <path d="M32 118 L160 38 L288 118" fill="none" stroke="#D4AF37" stroke-width="0.9" opacity="0.35"/>
-              <g transform="translate(160, 108)">
-                <circle r="28" fill="#161618" stroke="#D4AF37" stroke-width="2.2"/>
-                <circle r="22" fill="none" stroke="#B8860B" stroke-width="0.6" opacity="0.5"/>
-                <text x="0" y="8" text-anchor="middle" fill="#D4AF37" font-family="Instrument Serif, Georgia, serif" font-size="22" font-weight="600" letter-spacing="0.12em">AI</text>
-              </g>
+              <path d="M32 118 L160 38 L288 118" fill="none" stroke="#D4AF37" stroke-width="0.85" opacity="0.4"/>
+              <line x1="160" y1="48" x2="160" y2="108" stroke="#D4AF37" stroke-width="0.5" opacity="0.25"/>
             </g>
           </svg>
         </div>
       </div>
     </div>
-    <p class="footer-msg" id="inviteFooter">YOUR INVITATION TO ACTIVATE AI LIFE CONCIERGE</p>
+    <p class="footer-msg" id="naturalFooter">YOUR INVITATION TO ACTIVATE AI LIFE CONCIERGE</p>
   </div>
   <script>
     (function () {
-      var root = document.getElementById('invitationRoot');
+      var root = document.getElementById('naturalRoot');
       var btn = document.getElementById('envelopeBtn');
-      var footer = document.getElementById('inviteFooter');
+      var footer = document.getElementById('naturalFooter');
       var done = false;
       var wa = ${JSON.stringify(waUrl)};
-      function openInvitation() {
+      function openNatural() {
         if (done) return;
         done = true;
         try {
@@ -769,22 +773,22 @@ app.get('/portal', (req, res) => {
         root.classList.add('opened');
         footer.classList.add('switching');
         setTimeout(function () {
-          footer.textContent = 'REDIRECTING TO THE ARCHITECT...';
+          footer.textContent = 'OPENING YOUR VAULT...';
           footer.classList.remove('switching');
-        }, 380);
+        }, 200);
         setTimeout(function () {
           try {
             window.location.href = wa;
           } catch (err) {
             window.location.assign(wa);
           }
-        }, 1000);
+        }, 1100);
       }
-      btn.addEventListener('click', openInvitation);
+      btn.addEventListener('click', openNatural);
       btn.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          openInvitation();
+          openNatural();
         }
       });
     })();
