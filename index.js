@@ -61,7 +61,11 @@ app.post(
         user = byEmail.rows[0] || null;
       }
       if (user) {
-        await pool.query('UPDATE users SET tier = $1 WHERE id = $2', ['pro', user.id]);
+        await pool.query('UPDATE users SET tier = $1, subscription_status = $2 WHERE id = $3', [
+          'pro',
+          'PRO',
+          user.id,
+        ]);
         const identifier = user.phone_number || user.email || user.id;
         console.log(`User [${identifier}] upgraded to PRO tier.`);
       }
@@ -83,6 +87,21 @@ const pool = new Pool({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const composio = process.env.COMPOSIO_API_KEY ? Composio({ apiKey: process.env.COMPOSIO_API_KEY }) : null;
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
+
+function getMasterSkill() {
+  const skillPath = path.join(__dirname, 'skills', 'sovereign_architect.md');
+  return fs.readFileSync(skillPath, 'utf8');
+}
+
+/** Days since start (trial anchor). Uses absolute calendar diff; invalid/missing dates return null. */
+function calculateTrialDay(startDate) {
+  if (startDate == null || startDate === '') return null;
+  const start = new Date(startDate);
+  if (Number.isNaN(start.getTime())) return null;
+  const today = new Date();
+  const diffTime = Math.abs(today - start);
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
@@ -115,6 +134,9 @@ Composio execution (when integrations are connected):
 - Call execute_action with: tool_slug (exact Composio tool identifier), arguments (object matching that tool's schema), and connected_account_id when the user has multiple connections for the same toolkit.
 - Use execute_action only when it genuinely advances the user's request; otherwise continue with guidance and verified links.
 
+LOCKED OVERRIDE (google_super / Gmail & Calendar):
+- If LIVE USER CONTEXT shows google_super under locked_integrations (not ACTIVE), you MUST call initiate_secure_handshake before any execute_action that targets Gmail or Google Calendar tools. Do not attempt Gmail/Calendar execute_action until google_super is ACTIVE.
+
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
 
@@ -138,6 +160,63 @@ function formatToolboxSummary(connections, availableTools) {
     lines.push(`... and ${availableTools.length - preview.length} more tools.`);
   }
   return lines.join('\n');
+}
+
+/** Composio toolkit slug for unified Google (Gmail + Calendar) — must be ACTIVE before Gmail/Calendar execute_action. */
+const GOOGLE_SUPER_TOOLKIT = 'google_super';
+
+const EXECUTE_ACTION_ANTHROPIC_TOOL = {
+  name: 'execute_action',
+  description:
+    'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit. Do not use for Gmail/Google Calendar when google_super is LOCKED—use initiate_secure_handshake first.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      tool_slug: {
+        type: 'string',
+        description: 'Exact Composio tool slug (e.g. GMAIL_SEND_EMAIL).',
+      },
+      arguments: {
+        type: 'object',
+        description: 'Structured arguments for that tool.',
+      },
+      connected_account_id: {
+        type: 'string',
+        description: 'Composio connected account id when disambiguation is needed.',
+      },
+    },
+    required: ['tool_slug', 'arguments'],
+  },
+};
+
+const INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL = {
+  name: 'initiate_secure_handshake',
+  description:
+    'Start the secure OAuth / connection flow for Google (Gmail + Calendar) via Composio (toolkit google_super). Call this BEFORE any Gmail or Google Calendar execute_action when google_super is LOCKED in LIVE USER CONTEXT.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      intent: {
+        type: 'string',
+        description: 'Brief note on what the user needs after Google is connected (e.g. send email, create calendar event).',
+      },
+    },
+  },
+};
+
+function buildConnectionStatusReport(connections) {
+  const list = connections || [];
+  const active_integrations = list.map((c) => ({
+    toolkit: c.toolkitSlug,
+    connection_id: c.id,
+    state: 'ACTIVE',
+  }));
+  const activeSlugs = new Set(list.map((c) => c.toolkitSlug).filter((s) => s && s !== 'unknown'));
+  const locked_integrations = [];
+  if (!activeSlugs.has(GOOGLE_SUPER_TOOLKIT)) {
+    locked_integrations.push({ toolkit: GOOGLE_SUPER_TOOLKIT, state: 'LOCKED' });
+  }
+  return { active_integrations, locked_integrations };
 }
 
 async function executeComposioAction(toolInput, composioUserId) {
@@ -204,34 +283,14 @@ async function getAgentTools(userId) {
       }
     }
     const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
-    const anthropicTools =
-      connections.length > 0
-        ? [
-            {
-              name: 'execute_action',
-              description:
-                'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit.',
-              input_schema: {
-                type: 'object',
-                properties: {
-                  tool_slug: {
-                    type: 'string',
-                    description: 'Exact Composio tool slug (e.g. GMAIL_SEND_EMAIL).',
-                  },
-                  arguments: {
-                    type: 'object',
-                    description: 'Structured arguments for that tool.',
-                  },
-                  connected_account_id: {
-                    type: 'string',
-                    description: 'Composio connected account id when disambiguation is needed.',
-                  },
-                },
-                required: ['tool_slug', 'arguments'],
-              },
-            },
-          ]
-        : [];
+    const googleSuperActive = connections.some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+    const anthropicTools = [];
+    if (!googleSuperActive) {
+      anthropicTools.push(INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL);
+    }
+    if (connections.length > 0) {
+      anthropicTools.push(EXECUTE_ACTION_ANTHROPIC_TOOL);
+    }
     return {
       connections,
       availableTools,
@@ -243,7 +302,7 @@ async function getAgentTools(userId) {
     return {
       connections: [],
       availableTools: [],
-      anthropicTools: [],
+      anthropicTools: [INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL],
       toolboxSummary: '',
       error: err.message,
     };
@@ -403,22 +462,36 @@ async function sendEmail({ to, subject, text }) {
   }
 }
 
+async function syncTrialStartDateIfNull(user) {
+  if (!user || user.trial_start_date != null) return user;
+  const r = await pool.query(
+    `UPDATE users SET trial_start_date = created_at WHERE id = $1 AND trial_start_date IS NULL RETURNING trial_start_date`,
+    [user.id]
+  );
+  if (r.rows[0]) user.trial_start_date = r.rows[0].trial_start_date;
+  return user;
+}
+
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
-  return result.rows[0] || null;
+  const row = result.rows[0] || null;
+  if (row) await syncTrialStartDateIfNull(row);
+  return row;
 }
 
 async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
-  return result.rows[0];
+  const row = result.rows[0];
+  await syncTrialStartDateIfNull(row);
+  return row;
 }
 
 async function saveConversation(userId, messageBody, aiResponse, metadata = {}) {
@@ -446,12 +519,12 @@ async function getChatHistory(userId) {
   return history;
 }
 
-async function getHybridResponseFromMessages(messages, userMessage, toolbox, composioUserId) {
+async function getHybridResponseFromMessages(messages, userMessage, toolbox, composioUserId, baseSystemPrompt = null) {
   const composioSupplement =
     toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
       ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
       : '';
-  const system = ELITE_TRIAGE_SYSTEM_PROMPT + composioSupplement;
+  const system = (baseSystemPrompt || ELITE_TRIAGE_SYSTEM_PROMPT) + composioSupplement;
   const hasComposioTools = Boolean(composio && toolbox?.anthropicTools?.length);
 
   // --- TRY CLAUDE FIRST ---
@@ -481,6 +554,18 @@ async function getHybridResponseFromMessages(messages, userMessage, toolbox, com
               type: 'tool_result',
               tool_use_id: tu.id,
               content: payload,
+            });
+          } else if (tu.name === 'initiate_secure_handshake') {
+            results.push({
+              type: 'tool_result',
+              tool_use_id: tu.id,
+              content: JSON.stringify({
+                status: 'handshake_required',
+                toolkit: GOOGLE_SUPER_TOOLKIT,
+                intent: tu.input?.intent || null,
+                message:
+                  'Record that the secure OAuth handshake for Google (Gmail/Calendar) via Composio must be completed before execute_action for those tools. Guide the user to connect google_super in the Composio-managed flow.',
+              }),
             });
           } else {
             results.push({
@@ -632,8 +717,30 @@ async function search_vault_and_web(query) {
 
 async function runAgenticConcierge(user, userMessage) {
   const history = await getChatHistory(user.id);
-  const userContext = `User: ${user.first_name || 'Client'}. Current Tier: ${user.tier}.`;
   const toolbox = await getAgentTools(user.id);
+
+  const masterSkill = getMasterSkill();
+  const trialStart = user.trial_start_date ?? user.created_at;
+  const trialDay = calculateTrialDay(trialStart);
+  const connectionReport = buildConnectionStatusReport(toolbox.connections);
+  const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+  const dynamicContext = `
+### LIVE USER CONTEXT
+- user_id: ${user.id}
+- display_name: ${user.first_name || 'Client'}
+- trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
+- current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
+- subscription_status: ${user.subscription_status != null && String(user.subscription_status).trim() !== '' ? user.subscription_status : user.tier === 'pro' ? 'PRO' : 'LITE'}
+- connection_status: ${JSON.stringify(connectionReport)}
+- google_super_handshake_required: ${!googleSuperActive}
+`;
+  const lockedOverrideBlock = !googleSuperActive
+    ? `
+### LOCKED OVERRIDE (google_super)
+- google_super is not ACTIVE. Before any Gmail or Google Calendar execute_action, you MUST call initiate_secure_handshake.
+`
+    : '';
+  const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(userMessage);
 
@@ -662,14 +769,15 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const toolContext = `Vault recommendations:\n${vaultBlock}\n\nWeb results:\n${webBlock}${confidenceNote}`;
 
+  const displayName = user.first_name || 'Client';
   const messages = [
-    { role: 'user', content: `[CONTEXT: ${userContext}]` },
+    { role: 'user', content: `[CONTEXT: User: ${displayName}]` },
     { role: 'user', content: `[TOOL: search_vault_and_web]\n${toolContext}` },
     ...history,
     { role: 'user', content: userMessage },
   ];
 
-  return await getHybridResponseFromMessages(messages, userMessage, toolbox, user.id);
+  return await getHybridResponseFromMessages(messages, userMessage, toolbox, user.id, finalSystemPrompt);
 }
 
 async function getClaudeResponse(userTier, userMessage) {

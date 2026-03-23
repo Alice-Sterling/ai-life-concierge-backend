@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
   client_id VARCHAR(255) UNIQUE,
   tier user_tier NOT NULL DEFAULT 'lite',
   last_nudge_at TIMESTAMPTZ,
+  trial_start_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  subscription_status TEXT NOT NULL DEFAULT 'LITE',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -28,6 +30,22 @@ DO $$ BEGIN
     WHERE table_name = 'users' AND column_name = 'last_nudge_at'
   ) THEN
     ALTER TABLE users ADD COLUMN last_nudge_at TIMESTAMPTZ;
+  END IF;
+END $$;
+
+-- trial_start_date & subscription_status (for existing deployments)
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'trial_start_date'
+  ) THEN
+    ALTER TABLE users ADD COLUMN trial_start_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'subscription_status'
+  ) THEN
+    ALTER TABLE users ADD COLUMN subscription_status TEXT DEFAULT 'LITE';
   END IF;
 END $$;
 
