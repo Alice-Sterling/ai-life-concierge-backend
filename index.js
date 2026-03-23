@@ -5,6 +5,7 @@ const express = require('express');
 const cron = require('node-cron');
 const { Pool } = require('pg');
 const Anthropic = require('@anthropic-ai/sdk');
+const Composio = require('@composio/client');
 const { GoogleGenAI } = require('@google/genai');
 const { tavily } = require('@tavily/core');
 const nodemailer = require('nodemailer');
@@ -80,6 +81,7 @@ const pool = new Pool({
 });
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const composio = process.env.COMPOSIO_API_KEY ? Composio({ apiKey: process.env.COMPOSIO_API_KEY }) : null;
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
@@ -108,11 +110,145 @@ Agentic Auditing (mandatory):
 2. INQUISITIVE DELIGHT: When providing a recommendation, you must also ask one follow-up question that targets "Time Leakage"—e.g. "I've found the booking link for [Restaurant]. Out of curiosity, how many hours a month do you spend managing these types of administrative logistics?"
 3. PREDICTIVE STAGING: Always suggest one "Automated Next Step"—e.g. "I have the flight details. In the Pro Vault, I would now cross-reference this with your weather app and stage a car for your arrival. Would you like to see how we automate that?"
 
+Composio execution (when integrations are connected):
+- You may execute real actions on the user's linked apps via Composio using the tool named execute_action.
+- Call execute_action with: tool_slug (exact Composio tool identifier), arguments (object matching that tool's schema), and connected_account_id when the user has multiple connections for the same toolkit.
+- Use execute_action only when it genuinely advances the user's request; otherwise continue with guidance and verified links.
+
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
 
 const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
+
+function formatToolboxSummary(connections, availableTools) {
+  const lines = [];
+  lines.push(`Active Composio connections (${connections.length}):`);
+  connections.forEach((c) => {
+    lines.push(`- Toolkit: ${c.toolkitSlug} | connection_id: ${c.id}`);
+  });
+  lines.push('');
+  lines.push('Available tool slugs (use execute_action with exact tool_slug):');
+  const preview = availableTools.slice(0, 80);
+  preview.forEach((t) => {
+    const desc = (t.description || '').replace(/\s+/g, ' ').slice(0, 140);
+    lines.push(`- ${t.slug} (${t.toolkit})${desc ? ` — ${desc}` : ''}`);
+  });
+  if (availableTools.length > preview.length) {
+    lines.push(`... and ${availableTools.length - preview.length} more tools.`);
+  }
+  return lines.join('\n');
+}
+
+async function executeComposioAction(toolInput, composioUserId) {
+  if (!composio) {
+    return JSON.stringify({ error: 'Composio is not configured' });
+  }
+  const slug = toolInput?.tool_slug || toolInput?.toolSlug;
+  if (!slug) {
+    return JSON.stringify({ error: 'Missing tool_slug' });
+  }
+  try {
+    const res = await composio.tools.execute(slug, {
+      arguments: typeof toolInput.arguments === 'object' && toolInput.arguments !== null ? toolInput.arguments : {},
+      user_id: String(composioUserId),
+      ...(toolInput.connected_account_id ? { connected_account_id: toolInput.connected_account_id } : {}),
+    });
+    return typeof res === 'string' ? res : JSON.stringify(res);
+  } catch (err) {
+    return JSON.stringify({ error: err.message || String(err) });
+  }
+}
+
+/**
+ * Fetches active Composio connections for the user and builds a Toolbox (metadata + Anthropic tool defs).
+ * @param {string} userId - Internal user id (use the same id you pass to Composio as user_id).
+ */
+async function getAgentTools(userId) {
+  const uid = String(userId);
+  if (!composio) {
+    return {
+      connections: [],
+      availableTools: [],
+      anthropicTools: [],
+      toolboxSummary: '',
+    };
+  }
+  try {
+    const list = await composio.connectedAccounts.list({
+      user_ids: [uid],
+      statuses: ['ACTIVE'],
+      limit: 100,
+    });
+    const items = list.items || [];
+    const connections = items.map((item) => ({
+      id: item.id,
+      toolkitSlug: item.toolkit?.slug || 'unknown',
+    }));
+    const toolkitSlugs = [...new Set(connections.map((c) => c.toolkitSlug).filter((s) => s && s !== 'unknown'))];
+    const availableTools = [];
+    const seenSlugs = new Set();
+    for (const slug of toolkitSlugs) {
+      const toolsResp = await composio.tools.list({ toolkit_slug: slug, limit: 100 });
+      const conn = connections.find((c) => c.toolkitSlug === slug);
+      for (const t of toolsResp.items || []) {
+        if (seenSlugs.has(t.slug)) continue;
+        seenSlugs.add(t.slug);
+        availableTools.push({
+          slug: t.slug,
+          name: t.name,
+          description: t.description || t.human_description || '',
+          toolkit: slug,
+          connectedAccountId: conn?.id,
+        });
+      }
+    }
+    const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
+    const anthropicTools =
+      connections.length > 0
+        ? [
+            {
+              name: 'execute_action',
+              description:
+                'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit.',
+              input_schema: {
+                type: 'object',
+                properties: {
+                  tool_slug: {
+                    type: 'string',
+                    description: 'Exact Composio tool slug (e.g. GMAIL_SEND_EMAIL).',
+                  },
+                  arguments: {
+                    type: 'object',
+                    description: 'Structured arguments for that tool.',
+                  },
+                  connected_account_id: {
+                    type: 'string',
+                    description: 'Composio connected account id when disambiguation is needed.',
+                  },
+                },
+                required: ['tool_slug', 'arguments'],
+              },
+            },
+          ]
+        : [];
+    return {
+      connections,
+      availableTools,
+      anthropicTools,
+      toolboxSummary,
+    };
+  } catch (err) {
+    console.error('getAgentTools error:', err.message);
+    return {
+      connections: [],
+      availableTools: [],
+      anthropicTools: [],
+      toolboxSummary: '',
+      error: err.message,
+    };
+  }
+}
 
 function generateClientId() {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -310,16 +446,63 @@ async function getChatHistory(userId) {
   return history;
 }
 
-async function getHybridResponseFromMessages(messages, userMessage) {
+async function getHybridResponseFromMessages(messages, userMessage, toolbox, composioUserId) {
+  const composioSupplement =
+    toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
+      ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
+      : '';
+  const system = ELITE_TRIAGE_SYSTEM_PROMPT + composioSupplement;
+  const hasComposioTools = Boolean(composio && toolbox?.anthropicTools?.length);
+
   // --- TRY CLAUDE FIRST ---
   try {
+    if (hasComposioTools) {
+      const conv = messages.map((m) => ({ role: m.role, content: m.content }));
+      for (let step = 0; step < 6; step += 1) {
+        const msg = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1200,
+          system,
+          tools: toolbox.anthropicTools,
+          messages: conv,
+        });
+        const blocks = msg.content || [];
+        const toolUses = blocks.filter((b) => b.type === 'tool_use');
+        if (!toolUses.length) {
+          const tb = blocks.find((b) => b.type === 'text');
+          return tb ? tb.text : '';
+        }
+        conv.push({ role: 'assistant', content: blocks });
+        const results = [];
+        for (const tu of toolUses) {
+          if (tu.name === 'execute_action') {
+            const payload = await executeComposioAction(tu.input, composioUserId);
+            results.push({
+              type: 'tool_result',
+              tool_use_id: tu.id,
+              content: payload,
+            });
+          } else {
+            results.push({
+              type: 'tool_result',
+              tool_use_id: tu.id,
+              content: JSON.stringify({ error: `Unknown tool: ${tu.name}` }),
+            });
+          }
+        }
+        conv.push({ role: 'user', content: results });
+      }
+      return 'I reached the maximum number of tool steps. A human architect can assist.';
+    }
+
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1200,
-      system: ELITE_TRIAGE_SYSTEM_PROMPT,
+      system,
       messages,
     });
-    return msg.content[0].text;
+    const firstText = msg.content?.find((b) => b.type === 'text');
+    return firstText ? firstText.text : '';
   } catch (claudeErr) {
     console.error('Claude Failed. Error:', claudeErr.message);
 
@@ -331,12 +514,12 @@ async function getHybridResponseFromMessages(messages, userMessage) {
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({
           role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
+          parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
         }));
 
       const chat = geminiModel.startChat({
         history: geminiHistory.slice(0, -1),
-        systemInstruction: ELITE_TRIAGE_SYSTEM_PROMPT,
+        systemInstruction: system,
       });
 
       const result = await chat.sendMessage(userMessage);
@@ -450,6 +633,7 @@ async function search_vault_and_web(query) {
 async function runAgenticConcierge(user, userMessage) {
   const history = await getChatHistory(user.id);
   const userContext = `User: ${user.first_name || 'Client'}. Current Tier: ${user.tier}.`;
+  const toolbox = await getAgentTools(user.id);
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(userMessage);
 
@@ -485,7 +669,7 @@ async function runAgenticConcierge(user, userMessage) {
     { role: 'user', content: userMessage },
   ];
 
-  return await getHybridResponseFromMessages(messages, userMessage);
+  return await getHybridResponseFromMessages(messages, userMessage, toolbox, user.id);
 }
 
 async function getClaudeResponse(userTier, userMessage) {
