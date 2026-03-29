@@ -443,6 +443,27 @@ function getAirtableTableRef() {
   return null;
 }
 
+/** Airtable field names — set AIRTABLE_*_FIELD in Railway to match your base exactly. */
+function buildAirtableRecordFields({ client_id, phone_number, email, tier, last_message }) {
+  const pick = (envKey, fallback) => {
+    const v = process.env[envKey];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+    return fallback;
+  };
+  const phoneColumn = pick('AIRTABLE_PHONE_FIELD', 'Phone Number');
+  const emailField = pick('AIRTABLE_EMAIL_FIELD', 'Email');
+  const tierField = pick('AIRTABLE_TIER_FIELD', 'Tier');
+  const lastMsgField = pick('AIRTABLE_LAST_MESSAGE_FIELD', 'Last Message');
+
+  return {
+    'Client ID': client_id ?? '',
+    [phoneColumn]: phone_number ?? '',
+    [emailField]: email ?? '',
+    [tierField]: tier ?? '',
+    [lastMsgField]: last_message ?? '',
+  };
+}
+
 async function syncToAirtable({ client_id, phone_number, email, tier, last_message }) {
   const apiKey = process.env.AIRTABLE_API_KEY;
   const baseId = process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
@@ -456,16 +477,11 @@ async function syncToAirtable({ client_id, phone_number, email, tier, last_messa
   const keyHint =
     apiKey.length > 12 ? `Bearer ****…${apiKey.slice(-4)}` : 'Bearer ****';
 
+  const fields = buildAirtableRecordFields({ client_id, phone_number, email, tier, last_message });
   const payload = {
     records: [
       {
-        fields: {
-          client_id,
-          phone_number,
-          email,
-          tier,
-          last_message,
-        },
+        fields,
       },
     ],
   };
@@ -484,16 +500,18 @@ async function syncToAirtable({ client_id, phone_number, email, tier, last_messa
 
     if (!resp.ok) {
       const text = await resp.text();
+      console.log('[AIRTABLE] Sync failed but continuing to Agent...');
       if (resp.status === 404) {
         console.warn(
           '[AIRTABLE] Resource not found. Check BASE_ID and TABLE_NAME in Railway.',
           `(POST ${url})`
         );
       } else {
-        console.warn('[AIRTABLE] Sync failed:', resp.status, text.slice(0, 500));
+        console.warn('[AIRTABLE] HTTP', resp.status, text.slice(0, 500));
       }
     }
   } catch (err) {
+    console.log('[AIRTABLE] Sync failed but continuing to Agent...');
     console.warn('[AIRTABLE] non-critical sync error:', err?.message || err);
   }
 }
