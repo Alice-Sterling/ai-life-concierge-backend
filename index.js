@@ -124,6 +124,11 @@ function normalizeSearchQueryText(input) {
   return s;
 }
 
+/** True when the user message suggests connecting Google / calendar / OAuth (skip Tavily for these). */
+function hasHandshakeKeywordIntent(msgText) {
+  return /\b(connect|calendar|google|auth|link)\b/i.test(normalizeSearchQueryText(msgText));
+}
+
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
 Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven.
@@ -159,8 +164,8 @@ LOCKED OVERRIDE (google_super / Gmail & Calendar):
 - If LIVE USER CONTEXT shows google_super under locked_integrations (not ACTIVE), you MUST call initiate_secure_handshake before any execute_action that targets Gmail or Google Calendar tools. Do not attempt Gmail/Calendar execute_action until google_super is ACTIVE.
 
 AUTHENTICATION PRIORITIZATION (read LIVE USER CONTEXT):
-- If the user mentions connect, auth, calendar, or link (case-insensitive) AND google_super_handshake_required is true:
-  - IMMEDIATELY call the initiate_secure_handshake tool. Do not perform a Tavily search, vault search, or any other research first.
+- If the user mentions connect, calendar, google, auth, or link (case-insensitive) AND google_super_handshake_required is true:
+  - IMMEDIATELY call the initiate_secure_handshake tool (or use the redirectUrl already provided). Do not perform a Tavily search or other web research first.
 - When tool_result from initiate_secure_handshake includes redirectUrl, your very next assistant message MUST contain that full https URL verbatim so the user can open it. Never send a generic reply without the link.
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
@@ -838,24 +843,26 @@ async function searchRecommendations(query) {
   return { rows, lowConfidence, bestRank: best };
 }
 
-// Tool: search Postgres vault first, live web second.
-async function search_vault_and_web(query) {
-  const qText = normalizeSearchQueryText(query);
+// Tool: search Postgres vault first, live web second (Tavily optional via skipTavily).
+async function search_vault_and_web(query, { skipTavily = false } = {}) {
+  const qText = String(normalizeSearchQueryText(query) ?? '').trim();
   const vaultResult = await searchRecommendations(qText);
   const vault = vaultResult.rows;
   let web = [];
 
-  if (tavilyClient && qText.length > 0) {
+  if (!skipTavily && tavilyClient && qText.length > 0) {
     try {
+      const tavilyQuery = String(qText);
       const result = await tavilyClient.search({
-        query: qText,
+        query: tavilyQuery,
         max_results: 5,
         include_answer: false,
         include_images: false,
       });
       web = Array.isArray(result?.results) ? result.results : [];
     } catch (err) {
-      console.error('Tavily search failed:', err.message);
+      console.error('[Tavily] search failed (non-fatal):', err?.message || err);
+      web = [];
     }
   }
 
@@ -887,7 +894,8 @@ async function runAgenticConcierge(user, userMessage) {
   const history = await getChatHistory(user.id);
   const toolbox = await getAgentTools(user.id);
   const displayName = user.first_name || 'Client';
-  const msgText = normalizeSearchQueryText(userMessage);
+  const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
+  const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
 
   const masterSkill = getMasterSkill();
   const trialStart = user.trial_start_date ?? user.created_at;
@@ -912,10 +920,10 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
+  const googleSuperHandshakeRequired = !googleSuperActive;
+  const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
   const authPriorityIntent =
-    !googleSuperActive &&
-    Boolean(process.env.COMPOSIO_API_KEY) &&
-    /\b(connect|auth|calendar|link)\b/i.test(msgText);
+    googleSuperHandshakeRequired && composioKeyPresent && handshakeKeywordIntent;
 
   if (authPriorityIntent) {
     const oauthUrl = await initiateClientConnection(user.id);
@@ -932,7 +940,7 @@ async function runAgenticConcierge(user, userMessage) {
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = authPriorityIntent
     ? { vault: [], web: [], vaultLowConfidence: false, vaultBestRank: 0 }
-    : await search_vault_and_web(msgText);
+    : await search_vault_and_web(msgText, { skipTavily: handshakeKeywordIntent });
 
   const vaultBlock = vault.length
     ? vault
@@ -967,7 +975,11 @@ async function runAgenticConcierge(user, userMessage) {
   ];
 
   return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt, {
-    forceHandshakeToolFirst: authPriorityIntent,
+    forceHandshakeToolFirst:
+      googleSuperHandshakeRequired &&
+      composioKeyPresent &&
+      handshakeKeywordIntent &&
+      toolbox.anthropicTools?.some((t) => t.name === 'initiate_secure_handshake'),
   });
 }
 
