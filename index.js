@@ -379,6 +379,7 @@ async function getAgentTools(userId) {
     }
     const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
     const googleSuperActive = connections.some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+    // google_super_handshake_required: handshake tool first so tool_choice can target it before execute_action
     const anthropicTools = [];
     if (!googleSuperActive) {
       anthropicTools.push(INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL);
@@ -686,7 +687,7 @@ async function getHybridResponseFromMessages(
       ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
       : '';
   const system = (baseSystemPrompt || ELITE_TRIAGE_SYSTEM_PROMPT) + composioSupplement;
-  const hasComposioTools = Boolean(composio && toolbox?.anthropicTools?.length);
+  const hasComposioTools = Boolean(toolbox?.anthropicTools?.length);
 
   // --- TRY CLAUDE FIRST ---
   try {
@@ -1065,15 +1066,6 @@ app.post('/webhook', async (req, res) => {
 
     const incomingText = String(req.body.Body || '').trim();
 
-    // 2. PII-stripped Airtable sync (non-blocking; failures must not delay the webhook)
-    void syncToAirtable({
-      client_id: user.client_id,
-      phone_number: user.phone_number,
-      email: user.email || null,
-      tier: user.tier,
-      last_message: incomingText,
-    }).catch((err) => console.warn('[Airtable] non-critical sync failed:', err?.message || err));
-
     // 2. Conversational upgrade flow
     if (/\b(yes|trial)\b/i.test(incomingText)) {
       const upgradeResponse =
@@ -1092,7 +1084,8 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 3. Agentic Concierge for standard messages
+    // 3. Agentic Concierge first (Airtable runs after; never blocks the model)
+    console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
     console.log('Status: Running Agentic Concierge...');
     const aiResponse = await runAgenticConcierge(user, incomingText);
 
@@ -1108,7 +1101,16 @@ app.post('/webhook', async (req, res) => {
     // SAVE TO MEMORY
     await saveConversation(user.id, incomingText, aiResponse);
 
-    // 3. Twilio Response
+    // PII-stripped Airtable sync (after AI; non-blocking)
+    void syncToAirtable({
+      client_id: user.client_id,
+      phone_number: user.phone_number,
+      email: user.email || null,
+      tier: user.tier,
+      last_message: incomingText,
+    }).catch((e) => console.error('[Airtable] failed but AI is running:', e?.message || e));
+
+    // 5. Twilio Response
     console.log('Status: Sending TwiML back to Twilio...');
     res.type('text/xml');
     res.send(twimlMessage(aiResponse));
