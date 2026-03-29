@@ -342,6 +342,8 @@ async function initiateClientConnection(userOrEntityId) {
       }
     );
 
+    console.log('[CRITICAL] Composio API Response:', JSON.stringify(response.data));
+
     const finalUrl = response.data.redirectUrl || response.data.data?.redirectUrl;
 
     if (!finalUrl) {
@@ -969,35 +971,21 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
-  if (googleSuperHandshakeRequired && composioKeyPresent && /\bcalendar\b/i.test(msgText)) {
+  // Hard-wire: never use Claude/tool loop for vault handshake — return OAuth URL immediately
+  if (googleSuperHandshakeRequired && handshakeKeywordIntent && composioKeyPresent) {
     try {
-      const url = await initiateClientConnection(user);
-      if (url) {
-        return `I am preparing your secure vault. Please authorize here: ${url}`;
+      const oauthUrl = await initiateClientConnection(user);
+      if (oauthUrl) {
+        return `Handshake Initiated. Please authorize your vault here: ${oauthUrl}`;
       }
     } catch (err) {
-      console.error('[AUTH] Handshake failed (calendar path):', err?.message || err);
-    }
-    return 'Could not generate a vault link. Please try again shortly.';
-  }
-
-  const authPriorityIntent =
-    googleSuperHandshakeRequired && composioKeyPresent && handshakeKeywordIntent;
-
-  if (authPriorityIntent) {
-    try {
-      const url = await initiateClientConnection(user);
-      if (url) {
-        return `Logic staged. Authorize your vault here: ${url}`;
-      }
-    } catch (err) {
-      console.error('[AUTH] Handshake failed (auth priority path):', err?.message || err);
+      console.error('[AUTH] Handshake overrule failed:', err?.message || err);
     }
     return 'Could not generate a vault link. Please try again shortly.';
   }
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
-    skipTavily: handshakeKeywordIntent,
+    skipTavily: handshakeKeywordIntent ? true : false,
   });
 
   const vaultBlock = vault.length
