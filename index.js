@@ -938,27 +938,32 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
 
 async function runAgenticConcierge(user, userMessage) {
   const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
+  const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
   const subscriptionStatus = getSubscriptionStatusFromUser(user);
   const toolbox = await getAgentTools(user.id, { subscriptionStatus });
   const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+  const googleSuperHandshakeRequired = !googleSuperActive;
 
-  // Hard-anchor: calendar/connect + vault not linked — OAuth only, no Claude (avoids webhook timeout)
-  if (/\b(calendar|connect)\b/i.test(msgText) && process.env.COMPOSIO_API_KEY && !googleSuperActive) {
-    const link = await initiateClientConnection(user);
-    if (link) {
-      return `Handshake Initiated. Secure link: ${link}`;
+  if (handshakeKeywordIntent && googleSuperHandshakeRequired) {
+    console.log('[INTERCEPT] Auth intent detected. Manually fetching link...');
+
+    const authUrl = await initiateClientConnection(user);
+
+    if (authUrl) {
+      console.log('[INTERCEPT] Success! Injecting link into response.');
+      return `Handshake Initiated. To synchronize your Google Calendar with the Vault, please authorize here: ${authUrl}`;
     }
+    console.error('[INTERCEPT] Composio failed to return a URL.');
+    // Fallback to normal AI flow if manual fetch fails
   }
 
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
-  const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
 
   const masterSkill = getMasterSkill();
   const trialStart = user.trial_start_date ?? user.created_at;
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
-  const googleSuperHandshakeRequired = !googleSuperActive;
   const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
 
   const dynamicContext = `
@@ -979,19 +984,6 @@ async function runAgenticConcierge(user, userMessage) {
 `
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
-
-  // Hard-wire: never use Claude/tool loop for vault handshake — return OAuth URL immediately
-  if (googleSuperHandshakeRequired && handshakeKeywordIntent && composioKeyPresent) {
-    try {
-      const oauthUrl = await initiateClientConnection(user);
-      if (oauthUrl) {
-        return `Handshake Initiated. Please authorize your vault here: ${oauthUrl}`;
-      }
-    } catch (err) {
-      console.error('[AUTH] Handshake overrule failed:', err?.message || err);
-    }
-    return 'Could not generate a vault link. Please try again shortly.';
-  }
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: handshakeKeywordIntent ? true : false,
