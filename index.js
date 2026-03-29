@@ -279,24 +279,58 @@ async function executeComposioAction(toolInput, composioUserId) {
   }
 }
 
-/** userId must be the Postgres `users.id` UUID — Composio `entityId` and tool `user_id` use the same value. */
-async function initiateClientConnection(userId) {
-  const apiKey = process.env.COMPOSIO_API_KEY;
-  const authConfigId = process.env.COMPOSIO_AUTH_CONFIG_ID || 'ac_r3Vw8aAmkjo7';
-  const redirectUrl = process.env.COMPOSIO_REDIRECT_URL || 'https://ailifeconcierge.co.uk/vault-confirmed';
+/**
+ * Resolves Composio `entityId` from a user row or a raw id string (numbers must stay String-wrapped for the API).
+ * @param {object|string|number|null|undefined} user - User row `{ id, phone?, phone_number? }` or primitive id
+ * @returns {string|null}
+ */
+function resolveComposioEntityId(user) {
+  let entityId;
+  if (user != null && typeof user === 'object' && !Array.isArray(user)) {
+    entityId = String(user.id || user.phone || user.phone_number).trim();
+  } else {
+    entityId = String(user ?? '').trim();
+  }
+  if (!entityId || entityId === 'undefined' || entityId === 'null') {
+    console.error('[ERROR] No valid Entity ID found for handshake');
+    return null;
+  }
+  return entityId;
+}
 
-  console.log(`[AUTH] Attempting handshake for entityId=${String(userId)} with Config ${authConfigId}`);
+/**
+ * POST /v1/connected_accounts/initiate — entityId must match Composio `user_id` elsewhere; always stringified.
+ */
+async function initiateClientConnection(userOrEntityId) {
+  const entityId = resolveComposioEntityId(userOrEntityId);
+  if (entityId == null) {
+    return null;
+  }
+
+  const apiKey = process.env.COMPOSIO_API_KEY;
+  const authConfigId =
+    process.env.COMPOSIO_AUTH_CONFIG_ID != null && String(process.env.COMPOSIO_AUTH_CONFIG_ID).trim() !== ''
+      ? String(process.env.COMPOSIO_AUTH_CONFIG_ID).trim()
+      : '';
+  const redirectUrl = process.env.COMPOSIO_REDIRECT_URL || 'https://ailifeconcierge.co.uk/vault-confirmed';
 
   if (!apiKey) {
     console.error('[AUTH] COMPOSIO_API_KEY is not set');
     return null;
   }
+  if (!authConfigId) {
+    console.error('[AUTH] COMPOSIO_AUTH_CONFIG_ID is not set or empty');
+    return null;
+  }
 
   try {
+    console.log('[AUTH] Attempting handshake for Entity: ' + entityId);
+    console.log('[DEBUG] Handshake Payload:', { entityId, authConfigId });
+
     const response = await axios.post(
       'https://api.composio.dev/v1/connected_accounts/initiate',
       {
-        entityId: String(userId),
+        entityId: String(entityId),
         authConfigId,
         redirectUrl,
       },
@@ -315,7 +349,7 @@ async function initiateClientConnection(userId) {
       return null;
     }
 
-    console.log(`[AUTH] Success! Link generated for ${userId}`);
+    console.log(`[AUTH] Success! Link generated for ${entityId}`);
     return finalUrl;
   } catch (error) {
     console.error('[AUTH] CRITICAL FAILURE:', error.response?.data || error.message);
@@ -325,7 +359,7 @@ async function initiateClientConnection(userId) {
 
 /** Wraps initiateClientConnection for the Anthropic tool (JSON string for tool_result). */
 async function buildHandshakeToolResult(entityId, intent) {
-  const finalUrl = await initiateClientConnection(entityId);
+  const finalUrl = await initiateClientConnection({ id: entityId });
   if (!finalUrl) {
     return JSON.stringify({
       status: 'error',
@@ -913,6 +947,9 @@ async function runAgenticConcierge(user, userMessage) {
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
   const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+  const googleSuperHandshakeRequired = !googleSuperActive;
+  const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
+
   const dynamicContext = `
 ### LIVE USER CONTEXT
 - user_id: ${user.id}
@@ -932,22 +969,36 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
-  const googleSuperHandshakeRequired = !googleSuperActive;
-  const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
-  const authPriorityIntent =
-    googleSuperHandshakeRequired && composioKeyPresent && handshakeKeywordIntent;
-
-  if (authPriorityIntent) {
-    const url = await initiateClientConnection(String(user.id));
-    if (url) {
-      return `Logic staged. Authorize your vault here: ${url}`;
+  if (googleSuperHandshakeRequired && composioKeyPresent && /\bcalendar\b/i.test(msgText)) {
+    try {
+      const url = await initiateClientConnection(user);
+      if (url) {
+        return `I am preparing your secure vault. Please authorize here: ${url}`;
+      }
+    } catch (err) {
+      console.error('[AUTH] Handshake failed (calendar path):', err?.message || err);
     }
     return 'Could not generate a vault link. Please try again shortly.';
   }
 
-  const { vault, web, vaultLowConfidence, vaultBestRank } = authPriorityIntent
-    ? { vault: [], web: [], vaultLowConfidence: false, vaultBestRank: 0 }
-    : await search_vault_and_web(msgText, { skipTavily: handshakeKeywordIntent });
+  const authPriorityIntent =
+    googleSuperHandshakeRequired && composioKeyPresent && handshakeKeywordIntent;
+
+  if (authPriorityIntent) {
+    try {
+      const url = await initiateClientConnection(user);
+      if (url) {
+        return `Logic staged. Authorize your vault here: ${url}`;
+      }
+    } catch (err) {
+      console.error('[AUTH] Handshake failed (auth priority path):', err?.message || err);
+    }
+    return 'Could not generate a vault link. Please try again shortly.';
+  }
+
+  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
+    skipTavily: handshakeKeywordIntent,
+  });
 
   const vaultBlock = vault.length
     ? vault
@@ -1078,26 +1129,32 @@ app.post('/webhook', async (req, res) => {
     console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
     console.log('Status: Running Agentic Concierge...');
     const aiResponse = await runAgenticConcierge(user, incomingText);
+    console.log('[DEBUG] AI Response captured: ', aiResponse);
+
+    const replyBody =
+      typeof aiResponse === 'string' && aiResponse.trim() !== ''
+        ? aiResponse
+        : 'I have received your message. One moment while I prepare a reply.';
 
     // 4. Pro subscriber handling: notify Human Architect to authenticate execution
     if (getSubscriptionStatusFromUser(user) === 'PRO') {
       await sendEmail({
         to: 'assist@ailifeconcierge.co.uk',
         subject: `PRO TASK: ${phoneNumber}`,
-        text: `Pro task received.\n\nFrom: ${phoneNumber}\nProfileName: ${profileName || ''}\nClientID: ${user.client_id || ''}\nMessage: ${incomingText}\n\nAI response:\n${aiResponse}\n\nTimestamp: ${new Date().toISOString()}`,
+        text: `Pro task received.\n\nFrom: ${phoneNumber}\nProfileName: ${profileName || ''}\nClientID: ${user.client_id || ''}\nMessage: ${incomingText}\n\nAI response:\n${replyBody}\n\nTimestamp: ${new Date().toISOString()}`,
       });
     }
 
     // SAVE TO MEMORY
-    await saveConversation(user.id, incomingText, aiResponse);
+    await saveConversation(user.id, incomingText, replyBody);
 
     // DISABLED: Airtable sync — re-enable when core bot + field mapping are stable
     // void syncToAirtable({ ... }).catch(...);
 
-    // 5. Twilio Response
+    // 5. Twilio Response (only after aiResponse is fully resolved — must follow await above)
     console.log('Status: Sending TwiML back to Twilio...');
     res.type('text/xml');
-    res.send(twimlMessage(aiResponse));
+    res.send(twimlMessage(replyBody));
     console.log('--- WEBHOOK COMPLETE ---');
   } catch (err) {
     console.error('!!! ERROR IN WEBHOOK !!!');
