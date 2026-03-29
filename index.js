@@ -129,6 +129,15 @@ function hasHandshakeKeywordIntent(msgText) {
   return /\b(connect|calendar|google|auth|link)\b/i.test(normalizeSearchQueryText(msgText));
 }
 
+/** PRO/LITE from Postgres `subscription_status` only (no `tier` fallback). */
+function getSubscriptionStatusFromUser(user) {
+  if (user?.subscription_status != null && String(user.subscription_status).trim() !== '') {
+    const u = String(user.subscription_status).trim().toUpperCase();
+    return u === 'PRO' ? 'PRO' : 'LITE';
+  }
+  return 'LITE';
+}
+
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
 Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven.
@@ -270,12 +279,13 @@ async function executeComposioAction(toolInput, composioUserId) {
   }
 }
 
+/** userId must be the Postgres `users.id` UUID — Composio `entityId` and tool `user_id` use the same value. */
 async function initiateClientConnection(userId) {
   const apiKey = process.env.COMPOSIO_API_KEY;
   const authConfigId = process.env.COMPOSIO_AUTH_CONFIG_ID || 'ac_r3Vw8aAmkjo7';
   const redirectUrl = process.env.COMPOSIO_REDIRECT_URL || 'https://ailifeconcierge.co.uk/vault-confirmed';
 
-  console.log(`[AUTH] Attempting handshake for ${userId} with Config ${authConfigId}`);
+  console.log(`[AUTH] Attempting handshake for entityId=${String(userId)} with Config ${authConfigId}`);
 
   if (!apiKey) {
     console.error('[AUTH] COMPOSIO_API_KEY is not set');
@@ -336,10 +346,12 @@ async function buildHandshakeToolResult(entityId, intent) {
 
 /**
  * Fetches active Composio connections for the user and builds a Toolbox (metadata + Anthropic tool defs).
- * @param {string} userId - Internal user id (use the same id you pass to Composio as user_id).
+ * @param {string} userId - Postgres user UUID; used as Composio entityId / user_id everywhere.
+ * @param {{ subscriptionStatus?: 'PRO'|'LITE' }} [options] - execute_action is only exposed when subscriptionStatus is PRO.
  */
-async function getAgentTools(userId) {
+async function getAgentTools(userId, options = {}) {
   const uid = String(userId);
+  const subscriptionStatus = options.subscriptionStatus === 'PRO' ? 'PRO' : 'LITE';
   if (!composio) {
     return {
       connections: [],
@@ -384,7 +396,7 @@ async function getAgentTools(userId) {
     if (!googleSuperActive) {
       anthropicTools.push(INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL);
     }
-    if (connections.length > 0) {
+    if (connections.length > 0 && subscriptionStatus === 'PRO') {
       anthropicTools.push(EXECUTE_ACTION_ANTHROPIC_TOOL);
     }
     return {
@@ -888,30 +900,10 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
   return { vault, web, vaultLowConfidence: vaultResult.lowConfidence, vaultBestRank: vaultResult.bestRank };
 }
 
-async function composeAuthResponseWithMandatoryUrl({ baseSystemPrompt, displayName, history, msgText, oauthUrl }) {
-  const system = `${baseSystemPrompt}\n\nMANDATORY: Your reply MUST include this exact URL verbatim so the user can open it:\n${oauthUrl}`;
-  const messages = [
-    { role: 'user', content: `[CONTEXT: User: ${displayName}]` },
-    ...history.slice(-6),
-    { role: 'user', content: msgText },
-  ];
-  const msg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 600,
-    system,
-    messages,
-  });
-  const tb = msg.content?.find((b) => b.type === 'text');
-  let text = tb ? tb.text : '';
-  if (!text.includes(oauthUrl)) {
-    text = text.trim() ? `${text.trim()}\n\n${oauthUrl}` : oauthUrl;
-  }
-  return text;
-}
-
 async function runAgenticConcierge(user, userMessage) {
   const history = await getChatHistory(user.id);
-  const toolbox = await getAgentTools(user.id);
+  const subscriptionStatus = getSubscriptionStatusFromUser(user);
+  const toolbox = await getAgentTools(user.id, { subscriptionStatus });
   const displayName = user.first_name || 'Client';
   const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
   const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
@@ -927,7 +919,8 @@ async function runAgenticConcierge(user, userMessage) {
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
-- subscription_status: ${user.subscription_status != null && String(user.subscription_status).trim() !== '' ? user.subscription_status : user.tier === 'pro' ? 'PRO' : 'LITE'}
+- subscription_status: ${subscriptionStatus}
+- autonomous_execution_enabled: ${subscriptionStatus === 'PRO'}
 - connection_status: ${JSON.stringify(connectionReport)}
 - google_super_handshake_required: ${!googleSuperActive}
 `;
@@ -945,16 +938,11 @@ async function runAgenticConcierge(user, userMessage) {
     googleSuperHandshakeRequired && composioKeyPresent && handshakeKeywordIntent;
 
   if (authPriorityIntent) {
-    const oauthUrl = await initiateClientConnection(user.id);
-    if (oauthUrl) {
-      return await composeAuthResponseWithMandatoryUrl({
-        baseSystemPrompt: finalSystemPrompt,
-        displayName,
-        history,
-        msgText,
-        oauthUrl,
-      });
+    const url = await initiateClientConnection(String(user.id));
+    if (url) {
+      return `Logic staged. Authorize your vault here: ${url}`;
     }
+    return 'Could not generate a vault link. Please try again shortly.';
   }
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = authPriorityIntent
@@ -992,6 +980,8 @@ async function runAgenticConcierge(user, userMessage) {
     ...history,
     { role: 'user', content: msgText },
   ];
+
+  console.log('[DEBUG] Final System Prompt being sent to Claude: ', finalSystemPrompt.substring(0, 100));
 
   return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt, {
     forceHandshakeToolFirst:
@@ -1089,8 +1079,8 @@ app.post('/webhook', async (req, res) => {
     console.log('Status: Running Agentic Concierge...');
     const aiResponse = await runAgenticConcierge(user, incomingText);
 
-    // 4. Pro tier handling: notify Human Architect to authenticate execution
-    if (user.tier === 'pro') {
+    // 4. Pro subscriber handling: notify Human Architect to authenticate execution
+    if (getSubscriptionStatusFromUser(user) === 'PRO') {
       await sendEmail({
         to: 'assist@ailifeconcierge.co.uk',
         subject: `PRO TASK: ${phoneNumber}`,
@@ -1101,14 +1091,8 @@ app.post('/webhook', async (req, res) => {
     // SAVE TO MEMORY
     await saveConversation(user.id, incomingText, aiResponse);
 
-    // PII-stripped Airtable sync (after AI; non-blocking)
-    void syncToAirtable({
-      client_id: user.client_id,
-      phone_number: user.phone_number,
-      email: user.email || null,
-      tier: user.tier,
-      last_message: incomingText,
-    }).catch((e) => console.error('[Airtable] failed but AI is running:', e?.message || e));
+    // DISABLED: Airtable sync — re-enable when core bot + field mapping are stable
+    // void syncToAirtable({ ... }).catch(...);
 
     // 5. Twilio Response
     console.log('Status: Sending TwiML back to Twilio...');
