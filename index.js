@@ -1,5 +1,4 @@
 require('dotenv').config();
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -324,37 +323,69 @@ async function initiateClientConnection(userOrEntityId) {
   }
 
   try {
+    const composioHandshakePostUrl = 'https://api.composio.dev/v1/connected_accounts/initiate';
+    const body = JSON.stringify({
+      entityId: String(entityId),
+      authConfigId,
+      redirectUrl,
+    });
+
     console.log('[AUTH] Attempting handshake for Entity: ' + entityId);
     console.log('[DEBUG] Handshake Payload:', { entityId, authConfigId });
+    console.log('[DEBUG] Fetching from Composio with Entity:', entityId);
 
-    const response = await axios.post(
-      'https://api.composio.dev/v1/connected_accounts/initiate',
-      {
-        entityId: String(entityId),
-        authConfigId,
-        redirectUrl,
+    const fetchPromise = fetch(composioHandshakePostUrl, {
+      method: 'POST',
+      headers: {
+        Host: 'api.composio.dev',
+        'x-api-key': apiKey,
+        'Content-Type': 'application/json',
       },
-      {
-        headers: {
-          'x-api-key': apiKey,
-          'Content-Type': 'application/json',
-        },
+      body,
+    });
+
+    const timeoutMs = 10000;
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('__COMPOSIO_FETCH_TIMEOUT__')), timeoutMs);
+    });
+
+    let response;
+    try {
+      response = await Promise.race([fetchPromise, timeoutPromise]);
+    } catch (raceErr) {
+      if (raceErr && raceErr.message === '__COMPOSIO_FETCH_TIMEOUT__') {
+        console.log('[AUTH] Network Timeout reaching Composio');
+        return null;
       }
-    );
+      throw raceErr;
+    }
 
-    console.log('[CRITICAL] Composio API Response:', JSON.stringify(response.data));
+    const responseText = await response.text();
+    let data;
+    try {
+      data = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      data = { raw: responseText };
+    }
 
-    const finalUrl = response.data.redirectUrl || response.data.data?.redirectUrl;
+    console.log('[CRITICAL] Composio API Response:', JSON.stringify(data));
+
+    if (!response.ok) {
+      console.error('[AUTH] Composio HTTP', response.status, responseText.slice(0, 500));
+      return null;
+    }
+
+    const finalUrl = data.redirectUrl || data.data?.redirectUrl;
 
     if (!finalUrl) {
-      console.error('[AUTH] Composio Response missing URL:', JSON.stringify(response.data));
+      console.error('[AUTH] Composio Response missing URL:', JSON.stringify(data));
       return null;
     }
 
     console.log(`[AUTH] Success! Link generated for ${entityId}`);
     return finalUrl;
   } catch (error) {
-    console.error('[AUTH] CRITICAL FAILURE:', error.response?.data || error.message);
+    console.error('[AUTH] CRITICAL FAILURE:', error?.message || error);
     return null;
   }
 }
