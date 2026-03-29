@@ -937,18 +937,27 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
 }
 
 async function runAgenticConcierge(user, userMessage) {
-  const history = await getChatHistory(user.id);
+  const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
   const subscriptionStatus = getSubscriptionStatusFromUser(user);
   const toolbox = await getAgentTools(user.id, { subscriptionStatus });
+  const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+
+  // Hard-anchor: calendar/connect + vault not linked — OAuth only, no Claude (avoids webhook timeout)
+  if (/\b(calendar|connect)\b/i.test(msgText) && process.env.COMPOSIO_API_KEY && !googleSuperActive) {
+    const link = await initiateClientConnection(user);
+    if (link) {
+      return `Handshake Initiated. Secure link: ${link}`;
+    }
+  }
+
+  const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
-  const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
   const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
 
   const masterSkill = getMasterSkill();
   const trialStart = user.trial_start_date ?? user.created_at;
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
-  const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
   const googleSuperHandshakeRequired = !googleSuperActive;
   const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
 
@@ -1113,15 +1122,16 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 3. Agentic Concierge first (Airtable runs after; never blocks the model)
+    // 3. Agentic Concierge — single TwiML response only after await completes (no res.send before this)
     console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
     console.log('Status: Running Agentic Concierge...');
-    const aiResponse = await runAgenticConcierge(user, incomingText);
-    console.log('[DEBUG] AI Response captured: ', aiResponse);
+    console.log('[CRITICAL] Waiting for AI response...');
+    const aiText = await runAgenticConcierge(user, incomingText);
+    console.log('[CRITICAL] AI response received: ', aiText);
 
     const replyBody =
-      typeof aiResponse === 'string' && aiResponse.trim() !== ''
-        ? aiResponse
+      typeof aiText === 'string' && aiText.trim() !== ''
+        ? aiText
         : 'I have received your message. One moment while I prepare a reply.';
 
     // 4. Pro subscriber handling: notify Human Architect to authenticate execution
