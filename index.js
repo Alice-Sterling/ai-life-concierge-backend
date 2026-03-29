@@ -1,4 +1,5 @@
 require('dotenv').config();
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -192,7 +193,7 @@ const EXECUTE_ACTION_ANTHROPIC_TOOL = {
 const INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL = {
   name: 'initiate_secure_handshake',
   description:
-    'Start the secure OAuth / connection flow for Google (Gmail + Calendar) via Composio (toolkit google_super). Call this BEFORE any Gmail or Google Calendar execute_action when google_super is LOCKED in LIVE USER CONTEXT.',
+    'Start the secure OAuth flow for Google (Gmail + Calendar) via Composio (google_super). Calls Composio connected_accounts/initiate and returns an OAuth URL for the user. Call this BEFORE any Gmail or Google Calendar execute_action when google_super is LOCKED in LIVE USER CONTEXT.',
   input_schema: {
     type: 'object',
     properties: {
@@ -237,6 +238,70 @@ async function executeComposioAction(toolInput, composioUserId) {
   } catch (err) {
     return JSON.stringify({ error: err.message || String(err) });
   }
+}
+
+async function initiateClientConnection(userId) {
+  const apiKey = process.env.COMPOSIO_API_KEY;
+  const authConfigId = process.env.COMPOSIO_AUTH_CONFIG_ID || 'ac_r3Vw8aAmkjo7';
+  const redirectUrl = process.env.COMPOSIO_REDIRECT_URL || 'https://ailifeconcierge.co.uk/vault-confirmed';
+
+  console.log(`[AUTH] Attempting handshake for ${userId} with Config ${authConfigId}`);
+
+  if (!apiKey) {
+    console.error('[AUTH] COMPOSIO_API_KEY is not set');
+    return null;
+  }
+
+  try {
+    const response = await axios.post(
+      'https://api.composio.dev/v1/connected_accounts/initiate',
+      {
+        entityId: String(userId),
+        authConfigId,
+        redirectUrl,
+      },
+      {
+        headers: {
+          'x-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const finalUrl = response.data.redirectUrl || response.data.data?.redirectUrl;
+
+    if (!finalUrl) {
+      console.error('[AUTH] Composio Response missing URL:', JSON.stringify(response.data));
+      return null;
+    }
+
+    console.log(`[AUTH] Success! Link generated for ${userId}`);
+    return finalUrl;
+  } catch (error) {
+    console.error('[AUTH] CRITICAL FAILURE:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+/** Wraps initiateClientConnection for the Anthropic tool (JSON string for tool_result). */
+async function buildHandshakeToolResult(entityId, intent) {
+  const finalUrl = await initiateClientConnection(entityId);
+  if (!finalUrl) {
+    return JSON.stringify({
+      status: 'error',
+      toolkit: GOOGLE_SUPER_TOOLKIT,
+      intent: intent || null,
+      message: 'Could not obtain OAuth URL. Check Railway logs for [AUTH] lines.',
+    });
+  }
+  return JSON.stringify({
+    status: 'handshake_initiated',
+    toolkit: GOOGLE_SUPER_TOOLKIT,
+    intent: intent || null,
+    redirectUrl: finalUrl,
+    instruction:
+      'Give the user this OAuth URL to open in a browser to connect Google. After they complete OAuth and land on vault-confirmed, google_super should become ACTIVE.',
+  });
 }
 
 /**
@@ -556,16 +621,11 @@ async function getHybridResponseFromMessages(messages, userMessage, toolbox, com
               content: payload,
             });
           } else if (tu.name === 'initiate_secure_handshake') {
+            const payload = await buildHandshakeToolResult(composioUserId, tu.input?.intent);
             results.push({
               type: 'tool_result',
               tool_use_id: tu.id,
-              content: JSON.stringify({
-                status: 'handshake_required',
-                toolkit: GOOGLE_SUPER_TOOLKIT,
-                intent: tu.input?.intent || null,
-                message:
-                  'Record that the secure OAuth handshake for Google (Gmail/Calendar) via Composio must be completed before execute_action for those tools. Guide the user to connect google_super in the Composio-managed flow.',
-              }),
+              content: payload,
             });
           } else {
             results.push({
