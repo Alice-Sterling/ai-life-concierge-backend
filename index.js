@@ -104,6 +104,26 @@ function calculateTrialDay(startDate) {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 }
 
+/** Ensures vault/Tavily search input is a plain string (avoids Tavily 422 when query was serialized as '{"query":"..."}'). */
+function normalizeSearchQueryText(input) {
+  if (input == null) return '';
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    const q = input.query != null ? input.query : input.text;
+    if (q != null) return String(q).trim();
+    return '';
+  }
+  const s = String(input).trim();
+  if (s.startsWith('{') && s.includes('"query"')) {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && typeof parsed.query === 'string') return parsed.query.trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  return s;
+}
+
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
 Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven.
@@ -137,6 +157,11 @@ Composio execution (when integrations are connected):
 
 LOCKED OVERRIDE (google_super / Gmail & Calendar):
 - If LIVE USER CONTEXT shows google_super under locked_integrations (not ACTIVE), you MUST call initiate_secure_handshake before any execute_action that targets Gmail or Google Calendar tools. Do not attempt Gmail/Calendar execute_action until google_super is ACTIVE.
+
+AUTHENTICATION PRIORITIZATION (read LIVE USER CONTEXT):
+- If the user mentions connect, auth, calendar, or link (case-insensitive) AND google_super_handshake_required is true:
+  - IMMEDIATELY call the initiate_secure_handshake tool. Do not perform a Tavily search, vault search, or any other research first.
+- When tool_result from initiate_secure_handshake includes redirectUrl, your very next assistant message MUST contain that full https URL verbatim so the user can open it. Never send a generic reply without the link.
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
@@ -404,27 +429,44 @@ async function ensureClientIdForUser(userId) {
   return null;
 }
 
+/** Table name (e.g. Users) or table id (tbl…); AIRTABLE_TABLE_NAME takes precedence over AIRTABLE_USER_TABLE_ID. */
+function getAirtableTableRef() {
+  const byName = process.env.AIRTABLE_TABLE_NAME;
+  if (byName != null && String(byName).trim() !== '') return String(byName).trim();
+  const byId = process.env.AIRTABLE_USER_TABLE_ID;
+  if (byId != null && String(byId).trim() !== '') return String(byId).trim();
+  return null;
+}
+
 async function syncToAirtable({ client_id, phone_number, email, tier, last_message }) {
   const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = process.env.AIRTABLE_BASE_ID;
-  const tableName = process.env.AIRTABLE_TABLE_NAME;
-  if (!apiKey || !baseId || !tableName) return;
+  const baseId = process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
+  const tableRef = getAirtableTableRef();
+
+  if (!apiKey || !baseId || !tableRef) {
+    return;
+  }
+
+  const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableRef)}`;
+  const keyHint =
+    apiKey.length > 12 ? `Bearer ****…${apiKey.slice(-4)}` : 'Bearer ****';
+
+  const payload = {
+    records: [
+      {
+        fields: {
+          client_id,
+          phone_number,
+          email,
+          tier,
+          last_message,
+        },
+      },
+    ],
+  };
 
   try {
-    const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`;
-    const payload = {
-      records: [
-        {
-          fields: {
-            client_id,
-            phone_number,
-            email,
-            tier,
-            last_message,
-          },
-        },
-      ],
-    };
+    console.log(`[AIRTABLE] POST ${url} (${keyHint})`);
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -437,10 +479,17 @@ async function syncToAirtable({ client_id, phone_number, email, tier, last_messa
 
     if (!resp.ok) {
       const text = await resp.text();
-      console.error('Airtable sync failed:', resp.status, text);
+      if (resp.status === 404) {
+        console.warn(
+          '[AIRTABLE] Resource not found. Check BASE_ID and TABLE_NAME in Railway.',
+          `(POST ${url})`
+        );
+      } else {
+        console.warn('[AIRTABLE] Sync failed:', resp.status, text.slice(0, 500));
+      }
     }
   } catch (err) {
-    console.error('Airtable sync error:', err.message);
+    console.warn('[AIRTABLE] non-critical sync error:', err?.message || err);
   }
 }
 
@@ -584,7 +633,31 @@ async function getChatHistory(userId) {
   return history;
 }
 
-async function getHybridResponseFromMessages(messages, userMessage, toolbox, composioUserId, baseSystemPrompt = null) {
+function extractRedirectUrlFromToolConversation(conv) {
+  for (let i = conv.length - 1; i >= 0; i -= 1) {
+    const m = conv[i];
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block.type !== 'tool_result' || typeof block.content !== 'string') continue;
+      try {
+        const d = JSON.parse(block.content);
+        if (d.redirectUrl && typeof d.redirectUrl === 'string') return d.redirectUrl;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return null;
+}
+
+async function getHybridResponseFromMessages(
+  messages,
+  userMessage,
+  toolbox,
+  composioUserId,
+  baseSystemPrompt = null,
+  options = {}
+) {
   const composioSupplement =
     toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
       ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
@@ -597,18 +670,31 @@ async function getHybridResponseFromMessages(messages, userMessage, toolbox, com
     if (hasComposioTools) {
       const conv = messages.map((m) => ({ role: m.role, content: m.content }));
       for (let step = 0; step < 6; step += 1) {
-        const msg = await anthropic.messages.create({
+        const createPayload = {
           model: 'claude-sonnet-4-6',
           max_tokens: 1200,
           system,
           tools: toolbox.anthropicTools,
           messages: conv,
-        });
+        };
+        if (
+          options.forceHandshakeToolFirst &&
+          step === 0 &&
+          toolbox.anthropicTools?.some((t) => t.name === 'initiate_secure_handshake')
+        ) {
+          createPayload.tool_choice = { type: 'tool', name: 'initiate_secure_handshake' };
+        }
+        const msg = await anthropic.messages.create(createPayload);
         const blocks = msg.content || [];
         const toolUses = blocks.filter((b) => b.type === 'tool_use');
         if (!toolUses.length) {
           const tb = blocks.find((b) => b.type === 'text');
-          return tb ? tb.text : '';
+          let text = tb ? tb.text : '';
+          const mandatoryUrl = extractRedirectUrlFromToolConversation(conv);
+          if (mandatoryUrl && text && !text.includes(mandatoryUrl)) {
+            text = `${text.trim()}\n\nSecure link to connect Google: ${mandatoryUrl}`;
+          }
+          return text;
         }
         conv.push({ role: 'assistant', content: blocks });
         const results = [];
@@ -677,7 +763,7 @@ async function getHybridResponseFromMessages(messages, userMessage, toolbox, com
 }
 
 async function searchRecommendations(query) {
-  const raw = String(query || '').trim();
+  const raw = normalizeSearchQueryText(query);
   const q = `%${raw}%`;
 
   const stop = new Set([
@@ -754,14 +840,15 @@ async function searchRecommendations(query) {
 
 // Tool: search Postgres vault first, live web second.
 async function search_vault_and_web(query) {
-  const vaultResult = await searchRecommendations(query);
+  const qText = normalizeSearchQueryText(query);
+  const vaultResult = await searchRecommendations(qText);
   const vault = vaultResult.rows;
   let web = [];
 
-  if (tavilyClient) {
+  if (tavilyClient && qText.length > 0) {
     try {
       const result = await tavilyClient.search({
-        query: String(query || ''),
+        query: qText,
         max_results: 5,
         include_answer: false,
         include_images: false,
@@ -775,9 +862,32 @@ async function search_vault_and_web(query) {
   return { vault, web, vaultLowConfidence: vaultResult.lowConfidence, vaultBestRank: vaultResult.bestRank };
 }
 
+async function composeAuthResponseWithMandatoryUrl({ baseSystemPrompt, displayName, history, msgText, oauthUrl }) {
+  const system = `${baseSystemPrompt}\n\nMANDATORY: Your reply MUST include this exact URL verbatim so the user can open it:\n${oauthUrl}`;
+  const messages = [
+    { role: 'user', content: `[CONTEXT: User: ${displayName}]` },
+    ...history.slice(-6),
+    { role: 'user', content: msgText },
+  ];
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 600,
+    system,
+    messages,
+  });
+  const tb = msg.content?.find((b) => b.type === 'text');
+  let text = tb ? tb.text : '';
+  if (!text.includes(oauthUrl)) {
+    text = text.trim() ? `${text.trim()}\n\n${oauthUrl}` : oauthUrl;
+  }
+  return text;
+}
+
 async function runAgenticConcierge(user, userMessage) {
   const history = await getChatHistory(user.id);
   const toolbox = await getAgentTools(user.id);
+  const displayName = user.first_name || 'Client';
+  const msgText = normalizeSearchQueryText(userMessage);
 
   const masterSkill = getMasterSkill();
   const trialStart = user.trial_start_date ?? user.created_at;
@@ -802,7 +912,27 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
-  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(userMessage);
+  const authPriorityIntent =
+    !googleSuperActive &&
+    Boolean(process.env.COMPOSIO_API_KEY) &&
+    /\b(connect|auth|calendar|link)\b/i.test(msgText);
+
+  if (authPriorityIntent) {
+    const oauthUrl = await initiateClientConnection(user.id);
+    if (oauthUrl) {
+      return await composeAuthResponseWithMandatoryUrl({
+        baseSystemPrompt: finalSystemPrompt,
+        displayName,
+        history,
+        msgText,
+        oauthUrl,
+      });
+    }
+  }
+
+  const { vault, web, vaultLowConfidence, vaultBestRank } = authPriorityIntent
+    ? { vault: [], web: [], vaultLowConfidence: false, vaultBestRank: 0 }
+    : await search_vault_and_web(msgText);
 
   const vaultBlock = vault.length
     ? vault
@@ -829,15 +959,16 @@ async function runAgenticConcierge(user, userMessage) {
     : '';
   const toolContext = `Vault recommendations:\n${vaultBlock}\n\nWeb results:\n${webBlock}${confidenceNote}`;
 
-  const displayName = user.first_name || 'Client';
   const messages = [
     { role: 'user', content: `[CONTEXT: User: ${displayName}]` },
     { role: 'user', content: `[TOOL: search_vault_and_web]\n${toolContext}` },
     ...history,
-    { role: 'user', content: userMessage },
+    { role: 'user', content: msgText },
   ];
 
-  return await getHybridResponseFromMessages(messages, userMessage, toolbox, user.id, finalSystemPrompt);
+  return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt, {
+    forceHandshakeToolFirst: authPriorityIntent,
+  });
 }
 
 async function getClaudeResponse(userTier, userMessage) {
@@ -904,14 +1035,14 @@ app.post('/webhook', async (req, res) => {
 
     const incomingText = String(req.body.Body || '').trim();
 
-    // 2. PII-stripped Airtable sync
-    await syncToAirtable({
+    // 2. PII-stripped Airtable sync (non-blocking; failures must not delay the webhook)
+    void syncToAirtable({
       client_id: user.client_id,
       phone_number: user.phone_number,
       email: user.email || null,
       tier: user.tier,
       last_message: incomingText,
-    });
+    }).catch((err) => console.warn('[Airtable] non-critical sync failed:', err?.message || err));
 
     // 2. Conversational upgrade flow
     if (/\b(yes|trial)\b/i.test(incomingText)) {
