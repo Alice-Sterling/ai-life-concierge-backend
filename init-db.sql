@@ -47,6 +47,12 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users ADD COLUMN subscription_status TEXT DEFAULT 'LITE';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'google_super_connected'
+  ) THEN
+    ALTER TABLE users ADD COLUMN google_super_connected BOOLEAN NOT NULL DEFAULT false;
+  END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);

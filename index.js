@@ -123,11 +123,6 @@ function normalizeSearchQueryText(input) {
   return s;
 }
 
-/** True when the user message suggests connecting Google / calendar / OAuth (skip Tavily for these). */
-function hasHandshakeKeywordIntent(msgText) {
-  return /\b(connect|calendar|google|auth|link)\b/i.test(normalizeSearchQueryText(msgText));
-}
-
 /** PRO/LITE from Postgres `subscription_status` only (no `tier` fallback). */
 function getSubscriptionStatusFromUser(user) {
   if (user?.subscription_status != null && String(user.subscription_status).trim() !== '') {
@@ -135,6 +130,12 @@ function getSubscriptionStatusFromUser(user) {
     return u === 'PRO' ? 'PRO' : 'LITE';
   }
   return 'LITE';
+}
+
+/** Web onboarding URL with stable client id (Postgres `users.id`) for Pipedream / Vault handshake. */
+function generateOnboardingLink(userId) {
+  const id = encodeURIComponent(String(userId ?? '').trim());
+  return `https://ailifeconcierge.co.uk/onboarding?client_id=${id}`;
 }
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
@@ -168,13 +169,10 @@ Composio execution (when integrations are connected):
 - Call execute_action with: tool_slug (exact Composio tool identifier), arguments (object matching that tool's schema), and connected_account_id when the user has multiple connections for the same toolkit.
 - Use execute_action only when it genuinely advances the user's request; otherwise continue with guidance and verified links.
 
-LOCKED OVERRIDE (google_super / Gmail & Calendar):
-- If LIVE USER CONTEXT shows google_super under locked_integrations (not ACTIVE), you MUST call initiate_secure_handshake before any execute_action that targets Gmail or Google Calendar tools. Do not attempt Gmail/Calendar execute_action until google_super is ACTIVE.
-
-AUTHENTICATION PRIORITIZATION (read LIVE USER CONTEXT):
-- If the user mentions connect, calendar, google, auth, or link (case-insensitive) AND google_super_handshake_required is true:
-  - IMMEDIATELY call the initiate_secure_handshake tool (or use the redirectUrl already provided). Do not perform a Tavily search or other web research first.
-- When tool_result from initiate_secure_handshake includes redirectUrl, your very next assistant message MUST contain that full https URL verbatim so the user can open it. Never send a generic reply without the link.
+Calendar / Vault connection (web onboarding only):
+- Do not use any tool to connect OAuth or link a new Google account. Account linking is never done via chat tools.
+- When the user asks to connect their calendar, sync Google, or open the Vault (and that is the main request), respond with exactly this sentence, substituting the URL from LIVE USER CONTEXT (field calendar_onboarding_link) for [LINK] — output the full URL with no modification:
+I've prepared your secure vault access. Please complete the handshake here to sync your calendar: [LINK]
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
@@ -207,7 +205,7 @@ const GOOGLE_SUPER_TOOLKIT = 'google_super';
 const EXECUTE_ACTION_ANTHROPIC_TOOL = {
   name: 'execute_action',
   description:
-    'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit. Do not use for Gmail/Google Calendar when google_super is LOCKED—use initiate_secure_handshake first.',
+    'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit. Not for OAuth or first-time account linking.',
   input_schema: {
     type: 'object',
     properties: {
@@ -225,21 +223,6 @@ const EXECUTE_ACTION_ANTHROPIC_TOOL = {
       },
     },
     required: ['tool_slug', 'arguments'],
-  },
-};
-
-const INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL = {
-  name: 'initiate_secure_handshake',
-  description:
-    'Start the secure OAuth flow for Google (Gmail + Calendar) via Composio (google_super). Calls Composio connected_accounts/initiate and returns an OAuth URL for the user. Call this BEFORE any Gmail or Google Calendar execute_action when google_super is LOCKED in LIVE USER CONTEXT.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      intent: {
-        type: 'string',
-        description: 'Brief note on what the user needs after Google is connected (e.g. send email, create calendar event).',
-      },
-    },
   },
 };
 
@@ -276,139 +259,6 @@ async function executeComposioAction(toolInput, composioUserId) {
   } catch (err) {
     return JSON.stringify({ error: err.message || String(err) });
   }
-}
-
-/**
- * Resolves Composio `entityId` from a user row or a raw id string (numbers must stay String-wrapped for the API).
- * @param {object|string|number|null|undefined} user - User row `{ id, phone?, phone_number? }` or primitive id
- * @returns {string|null}
- */
-function resolveComposioEntityId(user) {
-  let entityId;
-  if (user != null && typeof user === 'object' && !Array.isArray(user)) {
-    entityId = String(user.id || user.phone || user.phone_number).trim();
-  } else {
-    entityId = String(user ?? '').trim();
-  }
-  if (!entityId || entityId === 'undefined' || entityId === 'null') {
-    console.error('[ERROR] No valid Entity ID found for handshake');
-    return null;
-  }
-  return entityId;
-}
-
-/**
- * POST /v1/connected_accounts/initiate — entityId must match Composio `user_id` elsewhere; always stringified.
- */
-async function initiateClientConnection(userOrEntityId) {
-  const entityId = resolveComposioEntityId(userOrEntityId);
-  if (entityId == null) {
-    return null;
-  }
-
-  const apiKey = process.env.COMPOSIO_API_KEY;
-  const authConfigId =
-    process.env.COMPOSIO_AUTH_CONFIG_ID != null && String(process.env.COMPOSIO_AUTH_CONFIG_ID).trim() !== ''
-      ? String(process.env.COMPOSIO_AUTH_CONFIG_ID).trim()
-      : '';
-  const redirectUrl = process.env.COMPOSIO_REDIRECT_URL || 'https://ailifeconcierge.co.uk/vault-confirmed';
-
-  if (!apiKey) {
-    console.error('[AUTH] COMPOSIO_API_KEY is not set');
-    return null;
-  }
-  if (!authConfigId) {
-    console.error('[AUTH] COMPOSIO_AUTH_CONFIG_ID is not set or empty');
-    return null;
-  }
-
-  try {
-    const composioHandshakePostUrl = 'https://api.composio.dev/v1/connected_accounts/initiate';
-    const body = JSON.stringify({
-      entityId: String(entityId),
-      authConfigId,
-      redirectUrl,
-    });
-
-    console.log('[AUTH] Attempting handshake for Entity: ' + entityId);
-    console.log('[DEBUG] Handshake Payload:', { entityId, authConfigId });
-    console.log('[DEBUG] Fetching from Composio with Entity:', entityId);
-
-    const fetchPromise = fetch(composioHandshakePostUrl, {
-      method: 'POST',
-      headers: {
-        Host: 'api.composio.dev',
-        'x-api-key': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body,
-    });
-
-    const timeoutMs = 10000;
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('__COMPOSIO_FETCH_TIMEOUT__')), timeoutMs);
-    });
-
-    let response;
-    try {
-      response = await Promise.race([fetchPromise, timeoutPromise]);
-    } catch (raceErr) {
-      if (raceErr && raceErr.message === '__COMPOSIO_FETCH_TIMEOUT__') {
-        console.log('[AUTH] Network Timeout reaching Composio');
-        return null;
-      }
-      throw raceErr;
-    }
-
-    const responseText = await response.text();
-    let data;
-    try {
-      data = responseText ? JSON.parse(responseText) : {};
-    } catch {
-      data = { raw: responseText };
-    }
-
-    console.log('[CRITICAL] Composio API Response:', JSON.stringify(data));
-
-    if (!response.ok) {
-      console.error('[AUTH] Composio HTTP', response.status, responseText.slice(0, 500));
-      return null;
-    }
-
-    const finalUrl = data.redirectUrl || data.data?.redirectUrl;
-
-    if (!finalUrl) {
-      console.error('[AUTH] Composio Response missing URL:', JSON.stringify(data));
-      return null;
-    }
-
-    console.log(`[AUTH] Success! Link generated for ${entityId}`);
-    return finalUrl;
-  } catch (error) {
-    console.error('[AUTH] CRITICAL FAILURE:', error?.message || error);
-    return null;
-  }
-}
-
-/** Wraps initiateClientConnection for the Anthropic tool (JSON string for tool_result). */
-async function buildHandshakeToolResult(entityId, intent) {
-  const finalUrl = await initiateClientConnection({ id: entityId });
-  if (!finalUrl) {
-    return JSON.stringify({
-      status: 'error',
-      toolkit: GOOGLE_SUPER_TOOLKIT,
-      intent: intent || null,
-      message: 'Could not obtain OAuth URL. Check Railway logs for [AUTH] lines.',
-    });
-  }
-  return JSON.stringify({
-    status: 'handshake_initiated',
-    toolkit: GOOGLE_SUPER_TOOLKIT,
-    intent: intent || null,
-    redirectUrl: finalUrl,
-    instruction:
-      'Give the user this OAuth URL to open in a browser to connect Google. After they complete OAuth and land on vault-confirmed, google_super should become ACTIVE.',
-  });
 }
 
 /**
@@ -457,12 +307,7 @@ async function getAgentTools(userId, options = {}) {
       }
     }
     const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
-    const googleSuperActive = connections.some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
-    // google_super_handshake_required: handshake tool first so tool_choice can target it before execute_action
     const anthropicTools = [];
-    if (!googleSuperActive) {
-      anthropicTools.push(INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL);
-    }
     if (connections.length > 0 && subscriptionStatus === 'PRO') {
       anthropicTools.push(EXECUTE_ACTION_ANTHROPIC_TOOL);
     }
@@ -477,7 +322,7 @@ async function getAgentTools(userId, options = {}) {
     return {
       connections: [],
       availableTools: [],
-      anthropicTools: [INITIATE_SECURE_HANDSHAKE_ANTHROPIC_TOOL],
+      anthropicTools: [],
       toolboxSummary: '',
       error: err.message,
     };
@@ -691,7 +536,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -703,7 +548,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -736,30 +581,12 @@ async function getChatHistory(userId) {
   return history;
 }
 
-function extractRedirectUrlFromToolConversation(conv) {
-  for (let i = conv.length - 1; i >= 0; i -= 1) {
-    const m = conv[i];
-    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
-    for (const block of m.content) {
-      if (block.type !== 'tool_result' || typeof block.content !== 'string') continue;
-      try {
-        const d = JSON.parse(block.content);
-        if (d.redirectUrl && typeof d.redirectUrl === 'string') return d.redirectUrl;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return null;
-}
-
 async function getHybridResponseFromMessages(
   messages,
   userMessage,
   toolbox,
   composioUserId,
-  baseSystemPrompt = null,
-  options = {}
+  baseSystemPrompt = null
 ) {
   const composioSupplement =
     toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
@@ -773,44 +600,24 @@ async function getHybridResponseFromMessages(
     if (hasComposioTools) {
       const conv = messages.map((m) => ({ role: m.role, content: m.content }));
       for (let step = 0; step < 6; step += 1) {
-        const createPayload = {
+        const msg = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
           max_tokens: 1200,
           system,
           tools: toolbox.anthropicTools,
           messages: conv,
-        };
-        if (
-          options.forceHandshakeToolFirst &&
-          step === 0 &&
-          toolbox.anthropicTools?.some((t) => t.name === 'initiate_secure_handshake')
-        ) {
-          createPayload.tool_choice = { type: 'tool', name: 'initiate_secure_handshake' };
-        }
-        const msg = await anthropic.messages.create(createPayload);
+        });
         const blocks = msg.content || [];
         const toolUses = blocks.filter((b) => b.type === 'tool_use');
         if (!toolUses.length) {
           const tb = blocks.find((b) => b.type === 'text');
-          let text = tb ? tb.text : '';
-          const mandatoryUrl = extractRedirectUrlFromToolConversation(conv);
-          if (mandatoryUrl && text && !text.includes(mandatoryUrl)) {
-            text = `${text.trim()}\n\nSecure link to connect Google: ${mandatoryUrl}`;
-          }
-          return text;
+          return tb ? tb.text : '';
         }
         conv.push({ role: 'assistant', content: blocks });
         const results = [];
         for (const tu of toolUses) {
           if (tu.name === 'execute_action') {
             const payload = await executeComposioAction(tu.input, composioUserId);
-            results.push({
-              type: 'tool_result',
-              tool_use_id: tu.id,
-              content: payload,
-            });
-          } else if (tu.name === 'initiate_secure_handshake') {
-            const payload = await buildHandshakeToolResult(composioUserId, tu.input?.intent);
             results.push({
               type: 'tool_result',
               tool_use_id: tu.id,
@@ -969,24 +776,10 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
 
 async function runAgenticConcierge(user, userMessage) {
   const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
-  const handshakeKeywordIntent = hasHandshakeKeywordIntent(msgText);
   const subscriptionStatus = getSubscriptionStatusFromUser(user);
   const toolbox = await getAgentTools(user.id, { subscriptionStatus });
-  const googleSuperActive = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
-  const googleSuperHandshakeRequired = !googleSuperActive;
-
-  if (handshakeKeywordIntent && googleSuperHandshakeRequired) {
-    console.log('[INTERCEPT] Auth intent detected. Manually fetching link...');
-
-    const authUrl = await initiateClientConnection(user);
-
-    if (authUrl) {
-      console.log('[INTERCEPT] Success! Injecting link into response.');
-      return `Handshake Initiated. To synchronize your Google Calendar with the Vault, please authorize here: ${authUrl}`;
-    }
-    console.error('[INTERCEPT] Composio failed to return a URL.');
-    // Fallback to normal AI flow if manual fetch fails
-  }
+  const composioGoogleSuper = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
+  const googleSuperActive = composioGoogleSuper || Boolean(user?.google_super_connected);
 
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
@@ -995,7 +788,6 @@ async function runAgenticConcierge(user, userMessage) {
   const trialStart = user.trial_start_date ?? user.created_at;
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
-  const composioKeyPresent = Boolean(process.env.COMPOSIO_API_KEY);
 
   const dynamicContext = `
 ### LIVE USER CONTEXT
@@ -1006,19 +798,18 @@ async function runAgenticConcierge(user, userMessage) {
 - subscription_status: ${subscriptionStatus}
 - autonomous_execution_enabled: ${subscriptionStatus === 'PRO'}
 - connection_status: ${JSON.stringify(connectionReport)}
-- google_super_handshake_required: ${!googleSuperActive}
+- google_super_connected: ${googleSuperActive}
+- calendar_onboarding_link: ${generateOnboardingLink(user.id)}
 `;
   const lockedOverrideBlock = !googleSuperActive
     ? `
-### LOCKED OVERRIDE (google_super)
-- google_super is not ACTIVE. Before any Gmail or Google Calendar execute_action, you MUST call initiate_secure_handshake.
+### VAULT CONNECTION (google_super)
+- google_super is not ACTIVE. For calendar sync / Vault access, use the sentence and calendar_onboarding_link from your main instructions — do not use tools for OAuth or linking.
 `
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
-  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
-    skipTavily: handshakeKeywordIntent ? true : false,
-  });
+  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText);
 
   const vaultBlock = vault.length
     ? vault
@@ -1054,13 +845,7 @@ async function runAgenticConcierge(user, userMessage) {
 
   console.log('[DEBUG] Final System Prompt being sent to Claude: ', finalSystemPrompt.substring(0, 100));
 
-  return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt, {
-    forceHandshakeToolFirst:
-      googleSuperHandshakeRequired &&
-      composioKeyPresent &&
-      handshakeKeywordIntent &&
-      toolbox.anthropicTools?.some((t) => t.name === 'initiate_secure_handshake'),
-  });
+  return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt);
 }
 
 async function getClaudeResponse(userTier, userMessage) {
@@ -1083,6 +868,23 @@ async function getClaudeResponse(userTier, userMessage) {
   const textBlock = response.content?.find((b) => b.type === 'text');
   return textBlock ? textBlock.text : 'I have noted your request. A team member will follow up.';
 }
+
+/**
+ * Handshake verification: WhatsApp message must match exactly after web onboarding.
+ * In your Pipedream HTTP step (calling external APIs), you may use headers such as:
+ *   Authorization: `Bearer ${accessToken}`
+ *   Content-Type: application/json
+ *   x-pd-environment: development  // use "production" when you launch
+ */
+const HANDSHAKE_VERIFICATION_INCOMING_MESSAGE =
+  'Handshake complete. I have successfully connected my calendar.';
+
+const HANDSHAKE_VERIFIED_ALICE_RESPONSE = `Handshake verified. 🛡️ Your secure Vault is now open. I have unlocked your first 3 Elite Services:
+1. Priority Schedule Triage
+2. Conflict Resolver
+3. Lifestyle Briefings.
+
+Shall we start by reviewing your upcoming week, or would you like to configure your Advanced Automations next?`;
 
 function twimlMessage(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(body)}</Message></Response>`;
@@ -1126,6 +928,20 @@ app.post('/webhook', async (req, res) => {
     console.log('Status: User identified as:', user.tier);
 
     const incomingText = String(req.body.Body || '').trim();
+
+    // Handshake verification (exact message — skips normal agent flow)
+    if (incomingText === HANDSHAKE_VERIFICATION_INCOMING_MESSAGE) {
+      await pool.query('UPDATE users SET google_super_connected = true WHERE id = $1', [user.id]);
+      user.google_super_connected = true;
+      console.log('[VERIFICATION] Handshake confirmed for user: ' + user.id);
+      await saveConversation(user.id, incomingText, HANDSHAKE_VERIFIED_ALICE_RESPONSE, {
+        trigger: 'handshake_verification',
+      });
+      res.type('text/xml');
+      res.send(twimlMessage(HANDSHAKE_VERIFIED_ALICE_RESPONSE));
+      console.log('--- WEBHOOK COMPLETE (handshake verification) ---');
+      return;
+    }
 
     // 2. Conversational upgrade flow
     if (/\b(yes|trial)\b/i.test(incomingText)) {
