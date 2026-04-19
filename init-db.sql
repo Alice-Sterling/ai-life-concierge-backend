@@ -55,6 +55,9 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS short_id VARCHAR(32) UNIQUE;
+CREATE INDEX IF NOT EXISTS idx_users_short_id ON users(short_id);
+
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);
 CREATE INDEX IF NOT EXISTS idx_users_last_nudge_at ON users(last_nudge_at);

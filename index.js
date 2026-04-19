@@ -11,6 +11,7 @@ const { tavily } = require('@tavily/core');
 const nodemailer = require('nodemailer');
 const twilio = require('twilio');
 const Stripe = require('stripe');
+const { customAlphabet } = require('nanoid');
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -84,6 +85,40 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL?.startsWith('postgres://') ? { rejectUnauthorized: false } : false,
 });
 
+const generateAiShortIdBody = customAlphabet(
+  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+  9
+);
+
+function buildAiPrefixedShortId() {
+  return `Ai-${generateAiShortIdBody()}`;
+}
+
+async function ensureShortIdForUser(userId) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const candidate = buildAiPrefixedShortId();
+    try {
+      const updated = await pool.query(
+        `UPDATE users SET short_id = $1 WHERE id = $2 AND (short_id IS NULL OR short_id = '') RETURNING short_id`,
+        [candidate, userId]
+      );
+      if (updated.rowCount > 0) return updated.rows[0].short_id;
+      const existing = await pool.query('SELECT short_id FROM users WHERE id = $1', [userId]);
+      return existing.rows[0]?.short_id || null;
+    } catch (err) {
+      if (err.code === '23505') continue;
+      throw err;
+    }
+  }
+  return null;
+}
+
+async function generateOnboardingLink(userId) {
+  const sid = await ensureShortIdForUser(userId);
+  if (!sid) throw new Error('Could not assign short_id');
+  return `https://ailifeconcierge.co.uk/onboarding?client_id=${encodeURIComponent(sid)}`;
+}
+
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const composio = process.env.COMPOSIO_API_KEY ? Composio({ apiKey: process.env.COMPOSIO_API_KEY }) : null;
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
@@ -130,12 +165,6 @@ function getSubscriptionStatusFromUser(user) {
     return u === 'PRO' ? 'PRO' : 'LITE';
   }
   return 'LITE';
-}
-
-/** Web onboarding URL with stable client id (Postgres `users.id`) for Pipedream / Vault handshake. */
-function generateOnboardingLink(userId) {
-  const id = encodeURIComponent(String(userId ?? '').trim());
-  return `https://ailifeconcierge.co.uk/onboarding?client_id=${id}`;
 }
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
@@ -536,7 +565,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -548,7 +577,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -789,6 +818,8 @@ async function runAgenticConcierge(user, userMessage) {
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
 
+  const calendarOnboardingLink = await generateOnboardingLink(user.id);
+
   const dynamicContext = `
 ### LIVE USER CONTEXT
 - user_id: ${user.id}
@@ -799,7 +830,7 @@ async function runAgenticConcierge(user, userMessage) {
 - autonomous_execution_enabled: ${subscriptionStatus === 'PRO'}
 - connection_status: ${JSON.stringify(connectionReport)}
 - google_super_connected: ${googleSuperActive}
-- calendar_onboarding_link: ${generateOnboardingLink(user.id)}
+- calendar_onboarding_link: ${calendarOnboardingLink}
 `;
   const lockedOverrideBlock = !googleSuperActive
     ? `
@@ -925,20 +956,25 @@ app.post('/webhook', async (req, res) => {
       const cid = await ensureClientIdForUser(user.id);
       if (cid) user.client_id = cid;
     }
+    if (!user.short_id) {
+      const sid = await ensureShortIdForUser(user.id);
+      if (sid) user.short_id = sid;
+    }
     console.log('Status: User identified as:', user.tier);
 
     const incomingText = String(req.body.Body || '').trim();
 
     // Handshake verification (exact message — skips normal agent flow)
     if (incomingText === HANDSHAKE_VERIFICATION_INCOMING_MESSAGE) {
-      const from = phoneNumber;
-      const phoneForDb = phoneNumberForDbMatch(from);
-      console.log(`[VERIFICATION] Handshake detected for: ${from}`);
-      await pool.query(
-        'UPDATE users SET google_super_connected = true WHERE phone_number IN ($1, $2)',
-        [phoneForDb, from]
-      );
-      user.google_super_connected = true;
+      const shortId = await ensureShortIdForUser(user.id);
+      if (shortId) user.short_id = shortId;
+      console.log(`[VERIFICATION] Handshake detected for: ${phoneNumber}`);
+      if (!shortId) {
+        console.error('[VERIFICATION] short_id could not be assigned; google_super_connected not updated');
+      } else {
+        await pool.query('UPDATE users SET google_super_connected = true WHERE short_id = $1', [shortId]);
+        user.google_super_connected = true;
+      }
       await saveConversation(user.id, incomingText, HANDSHAKE_VERIFIED_ALICE_RESPONSE, {
         trigger: 'handshake_verification',
       });
