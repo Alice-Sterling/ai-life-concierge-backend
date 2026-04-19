@@ -931,9 +931,14 @@ app.post('/webhook', async (req, res) => {
 
     // Handshake verification (exact message — skips normal agent flow)
     if (incomingText === HANDSHAKE_VERIFICATION_INCOMING_MESSAGE) {
-      await pool.query('UPDATE users SET google_super_connected = true WHERE id = $1', [user.id]);
+      const from = phoneNumber;
+      const phoneForDb = phoneNumberForDbMatch(from);
+      console.log(`[VERIFICATION] Handshake detected for: ${from}`);
+      await pool.query(
+        'UPDATE users SET google_super_connected = true WHERE phone_number IN ($1, $2)',
+        [phoneForDb, from]
+      );
       user.google_super_connected = true;
-      console.log('[VERIFICATION] Handshake confirmed for user: ' + user.id);
       await saveConversation(user.id, incomingText, HANDSHAKE_VERIFIED_ALICE_RESPONSE, {
         trigger: 'handshake_verification',
       });
