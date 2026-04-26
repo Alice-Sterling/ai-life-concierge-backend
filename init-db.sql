@@ -53,7 +53,27 @@ DO $$ BEGIN
   ) THEN
     ALTER TABLE users ADD COLUMN google_super_connected BOOLEAN NOT NULL DEFAULT false;
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'calendar_provider'
+  ) THEN
+    ALTER TABLE users ADD COLUMN calendar_provider TEXT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'users' AND column_name = 'architecture_synced_at'
+  ) THEN
+    ALTER TABLE users ADD COLUMN architecture_synced_at TIMESTAMPTZ;
+  END IF;
 END $$;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS short_id VARCHAR(32) UNIQUE;
+CREATE INDEX IF NOT EXISTS idx_users_short_id ON users(short_id);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS total_fee NUMERIC(14, 2);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active_automations TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS lifestyle_architect BOOLEAN;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN NOT NULL DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);

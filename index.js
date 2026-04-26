@@ -11,6 +11,7 @@ const { tavily } = require('@tavily/core');
 const nodemailer = require('nodemailer');
 const twilio = require('twilio');
 const Stripe = require('stripe');
+const { customAlphabet } = require('nanoid');
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -84,6 +85,40 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL?.startsWith('postgres://') ? { rejectUnauthorized: false } : false,
 });
 
+const generateAiShortIdBody = customAlphabet(
+  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+  9
+);
+
+function buildAiPrefixedShortId() {
+  return `Ai-${generateAiShortIdBody()}`;
+}
+
+async function ensureShortIdForUser(userId) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const candidate = buildAiPrefixedShortId();
+    try {
+      const updated = await pool.query(
+        `UPDATE users SET short_id = $1 WHERE id = $2 AND (short_id IS NULL OR short_id = '') RETURNING short_id`,
+        [candidate, userId]
+      );
+      if (updated.rowCount > 0) return updated.rows[0].short_id;
+      const existing = await pool.query('SELECT short_id FROM users WHERE id = $1', [userId]);
+      return existing.rows[0]?.short_id || null;
+    } catch (err) {
+      if (err.code === '23505') continue;
+      throw err;
+    }
+  }
+  return null;
+}
+
+async function generateOnboardingLink(userId) {
+  const sid = await ensureShortIdForUser(userId);
+  if (!sid) throw new Error('Could not assign short_id');
+  return `https://ailifeconcierge.co.uk/onboarding?client_id=${encodeURIComponent(sid)}`;
+}
+
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const composio = process.env.COMPOSIO_API_KEY ? Composio({ apiKey: process.env.COMPOSIO_API_KEY }) : null;
 const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
@@ -132,15 +167,17 @@ function getSubscriptionStatusFromUser(user) {
   return 'LITE';
 }
 
-/** Web onboarding URL with stable client id (Postgres `users.id`) for Pipedream / Vault handshake. */
-function generateOnboardingLink(userId) {
-  const id = encodeURIComponent(String(userId ?? '').trim());
-  return `https://ailifeconcierge.co.uk/onboarding?client_id=${id}`;
-}
-
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
-Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven.
+Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven. You are **Alice** (the Sovereign Architect) — this Master System Prompt overrides conflicting defaults.
+
+### MASTER SYSTEM PROMPT (Alice — CRITICAL WIRING)
+1. **Systems sync handshake:** When the user sends the exact phrase: I've now connected my calendar and enabled my automations - please sync systems to activate. — you MUST call fetch_architecture_profile (if the tool is available) with **client_id** taken from LIVE USER CONTEXT. If LIVE USER CONTEXT already lists calendar_provider, active_automations, and a recent architecture_synced_at, treat those as the synced session; only call fetch again if the user is explicitly re-syncing or data is missing/stale.
+2. **client_id:** Always pass the client_id from LIVE USER CONTEXT into fetch_architecture_profile and execute_pipedream_calendar_task.
+3. **Session context:** When the Pipedream response includes CalendarProvider and ActiveAutomations, commit them to your working memory and rely on the LIVE USER CONTEXT fields (calendar_provider, active_automations) for all subsequent turns; reference CalendarProvider in execute_pipedream_calendar_task **details** when dispatching to Pipedream.
+4. **Calendar execution:** For all calendar read/write and scheduling, use **execute_pipedream_calendar_task** only — never Composio tools for calendar or scheduling.
+5. **Horley Standard (location verification):** For logistics, trades, cleaners, and local service providers, do not assert that a business serves the user’s area until you have verified it: check published service area, postcodes, or geography (e.g. RH6, Horley, Surrey) against the user’s need. If you cannot verify, say so and offer a verification step. Align with the Sovereign Architect skill for audit depth.
+6. **180-day Founding Member lifecycle:** Use trial_start_date (or created_at) as day 0 of enrollment. For **days 0–180** from that anchor, apply Founding Member treatment: priority framing, partnership in building their Concierge, and lifecycle-aware check-ins. **After day 180**, unless they are PRO, shift to the standard member cadence for automation scope and trial/founding copy. Use days_since_enrollment and founding_member_180_window from LIVE USER CONTEXT when deciding tone.
 
 Standard Opening (Welcome Hook / Menu of Autonomy):
 If this is the user's first interaction or they are just saying hello, respond with:
@@ -165,9 +202,19 @@ Agentic Auditing (mandatory):
 3. PREDICTIVE STAGING: Always suggest one "Automated Next Step"—e.g. "I have the flight details. In the Pro Vault, I would now cross-reference this with your weather app and stage a car for your arrival. Would you like to see how we automate that?"
 
 Composio execution (when integrations are connected):
-- You may execute real actions on the user's linked apps via Composio using the tool named execute_action.
+- You may execute real actions on the user's linked non-calendar apps via Composio using the tool named execute_action.
 - Call execute_action with: tool_slug (exact Composio tool identifier), arguments (object matching that tool's schema), and connected_account_id when the user has multiple connections for the same toolkit.
 - Use execute_action only when it genuinely advances the user's request; otherwise continue with guidance and verified links.
+- FORBIDDEN for execute_action: any Google Calendar, Microsoft/Outlook calendar, scheduling, free/busy, event creation, event listing, or meeting-slot logic — those are never Composio in this system.
+
+CALENDAR EXECUTION PROTOCOL (mandatory when calendar or scheduling is involved):
+- Primary engine: ALL calendar and scheduling operations MUST go through execute_pipedream_calendar_task only. Do not use execute_action or any Composio path for reading/writing the user's calendar, finding time, or booking events.
+- Before ANY execute_pipedream_calendar_task call, use fetch_architecture_profile (if available) with client_id from LIVE USER CONTEXT, read the response for CalendarProvider (or equivalent), and base your Pipedream command on that provider. Reference CalendarProvider in your reasoning and, where helpful, in the details string so Pipedream dispatches correctly.
+- Action mapping: if the user (or you) is finding a gap, a window, or availability — use action "find_slot". If they want to book, schedule, or create a calendar event — use action "create_event". For a general read of what's on the calendar or a time range — use "read_calendar".
+- OAuth: never use these tools to link accounts; use web onboarding only (calendar_onboarding_link).
+
+Pipedream calendar (execute_pipedream_calendar_task):
+- Pass client_id from LIVE USER CONTEXT, one of read_calendar | create_event | find_slot, and a details string (times, dates, titles; include provider context from fetch_architecture_profile when relevant).
 
 Calendar / Vault connection (web onboarding only):
 - Do not use any tool to connect OAuth or link a new Google account. Account linking is never done via chat tools.
@@ -205,7 +252,7 @@ const GOOGLE_SUPER_TOOLKIT = 'google_super';
 const EXECUTE_ACTION_ANTHROPIC_TOOL = {
   name: 'execute_action',
   description:
-    'Execute a Composio integration action for this user (email, calendar, CRM, etc.). Requires exact tool_slug and arguments object. Use connected_account_id from the toolbox context when multiple connections exist for one toolkit. Not for OAuth or first-time account linking.',
+    'Composio integration actions for this user: email, CRM, and non-calendar automation. NOT for Google Calendar, Outlook calendar, events, meetings, free/busy, or scheduling — the backend rejects calendar-like tool slugs; use execute_pipedream_calendar_task for those. Requires tool_slug, arguments, and connected_account_id when needed. Not for OAuth.',
   input_schema: {
     type: 'object',
     properties: {
@@ -225,6 +272,199 @@ const EXECUTE_ACTION_ANTHROPIC_TOOL = {
     required: ['tool_slug', 'arguments'],
   },
 };
+
+const FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL = {
+  name: 'fetch_architecture_profile',
+  description:
+    'Retrieves validated onboarding data from the Pipedream/Airtable registry, including CalendarProvider and ActiveAutomations. Required when the user says the exact systems-sync handshake (see system prompt) or when those fields are not yet in LIVE USER CONTEXT. Pass client_id from LIVE USER CONTEXT.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      client_id: { type: 'string', description: 'Client identifier (e.g. Ai-XXXXXX from the user record).' },
+    },
+    required: ['client_id'],
+  },
+};
+
+function getArchitectureProfileAnthropicTools() {
+  const url = process.env.FETCH_ARCHITECTURE_PROFILE_URL;
+  if (!url || !String(url).trim()) return [];
+  return [FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL];
+}
+
+/**
+ * POST { client_id } to the architecture profile Pipedream URL. Set FETCH_ARCHITECTURE_PROFILE_URL.
+ * Optional: FETCH_ARCHITECTURE_PROFILE_TOKEN or PIPEDREAM_ARCHITECTURE_PROFILE_TOKEN (Bearer), PIPEDREAM_ENVIRONMENT.
+ */
+async function fetchArchitectureProfileFromPipedream(clientId) {
+  const url = process.env.FETCH_ARCHITECTURE_PROFILE_URL;
+  if (!url || !String(url).trim()) {
+    return JSON.stringify({
+      error: 'fetch_architecture_profile is not configured (set FETCH_ARCHITECTURE_PROFILE_URL)',
+    });
+  }
+  const cid = String(clientId ?? '').trim();
+  if (!cid) {
+    return JSON.stringify({ error: 'client_id is required' });
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  const token = process.env.FETCH_ARCHITECTURE_PROFILE_TOKEN || process.env.PIPEDREAM_ARCHITECTURE_PROFILE_TOKEN;
+  if (token != null && String(token).trim() !== '') {
+    headers.Authorization = `Bearer ${String(token).trim()}`;
+  }
+  const pdEnv = process.env.PIPEDREAM_ENVIRONMENT;
+  if (pdEnv != null && String(pdEnv).trim() !== '') {
+    headers['x-pd-environment'] = String(pdEnv).trim();
+  }
+  try {
+    const res = await fetch(String(url).trim(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ client_id: cid }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return JSON.stringify({
+        error: `HTTP ${res.status}`,
+        body: text.length > 4000 ? `${text.slice(0, 4000)}…` : text,
+      });
+    }
+    return text.length > 12000 ? `${text.slice(0, 12000)}\n…[truncated]` : text;
+  } catch (err) {
+    return JSON.stringify({ error: err.message || String(err) });
+  }
+}
+
+/**
+ * Pipedream profile JSON → CalendarProvider + ActiveAutomations. Keys may be camelCase or snake_case.
+ * Returns { calendarProvider, activeAutomations } for persistence on users.
+ */
+function extractArchitectureSessionFields(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { calendarProvider: null, activeAutomations: null };
+  }
+  if (data.error) return { calendarProvider: null, activeAutomations: null };
+  const cal =
+    data.CalendarProvider ?? data.calendarProvider ?? data.calendar_provider ?? null;
+  const auto =
+    data.ActiveAutomations ?? data.activeAutomations ?? data.active_automations ?? null;
+  return { calendarProvider: cal, activeAutomations: auto };
+}
+
+/**
+ * Parse successful Pipedream body text; persist to users. Returns { calendarProvider, activeAutomations } or null.
+ */
+async function persistArchitectureSessionFromPipedreamResponse(userId, rawText) {
+  const id = String(userId ?? '').trim();
+  if (!id || rawText == null) return null;
+  const t = String(rawText).trim();
+  if (t.length === 0) return null;
+  let data;
+  try {
+    data = JSON.parse(t);
+  } catch {
+    return null;
+  }
+  if (data && typeof data === 'object' && data.error) return null;
+  const { calendarProvider, activeAutomations } = extractArchitectureSessionFields(data);
+  const calStr = calendarProvider != null ? String(calendarProvider) : null;
+  const autoStr =
+    activeAutomations == null
+      ? null
+      : typeof activeAutomations === 'string'
+        ? activeAutomations
+        : JSON.stringify(activeAutomations);
+  try {
+    await pool.query(
+      `UPDATE users SET calendar_provider = $1, active_automations = $2, architecture_synced_at = NOW() WHERE id = $3::uuid`,
+      [calStr, autoStr, id]
+    );
+  } catch (err) {
+    console.error('[SYNC] persist architecture session failed:', err?.message || err);
+    return null;
+  }
+  return { calendarProvider: calStr, activeAutomations: autoStr };
+}
+
+const PIPEDREAM_CALENDAR_ACTIONS = ['read_calendar', 'create_event', 'find_slot'];
+
+const EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL = {
+  name: 'execute_pipedream_calendar_task',
+  description:
+    "Sends a command to Pipedream to read or write the user's Google/Outlook calendar. After fetch_architecture_profile, align with CalendarProvider. Use client_id from LIVE USER CONTEXT.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      client_id: { type: 'string', description: 'Client identifier (e.g. Ai-XXXXXX from the user record).' },
+      action: {
+        type: 'string',
+        enum: PIPEDREAM_CALENDAR_ACTIONS,
+        description:
+          'read_calendar: view/range; create_event: book/schedule; find_slot: user wants a gap/availability (e.g. "find a gap") use find_slot, ("book this") use create_event.',
+      },
+      details: {
+        type: 'string',
+        description:
+          'Times, dates, event titles, time zones. State CalendarProvider (from fetch_architecture_profile) so Pipedream uses the right backend.',
+      },
+    },
+    required: ['client_id', 'action', 'details'],
+  },
+};
+
+function getPipedreamCalendarAnthropicTools() {
+  const url = process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL;
+  if (!url || !String(url).trim()) return [];
+  return [EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL];
+}
+
+/**
+ * POST { client_id, action, details } to the Pipedream HTTP trigger. Set PIPEDREAM_CALENDAR_URL
+ * to the full URL (e.g. https://xxx.m.pipedream.net). Optional: PIPEDREAM_CALENDAR_TOKEN (Bearer), PIPEDREAM_ENVIRONMENT.
+ */
+async function executePipedreamCalendarTask(input) {
+  const url = process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL;
+  if (!url || !String(url).trim()) {
+    return JSON.stringify({
+      error: 'Pipedream calendar URL is not configured (set PIPEDREAM_CALENDAR_URL)',
+    });
+  }
+  const client_id = String(input?.client_id ?? '').trim();
+  const action = input?.action;
+  const details = String(input?.details ?? '');
+  if (!client_id) {
+    return JSON.stringify({ error: 'client_id is required' });
+  }
+  if (!PIPEDREAM_CALENDAR_ACTIONS.includes(action)) {
+    return JSON.stringify({ error: `action must be one of: ${PIPEDREAM_CALENDAR_ACTIONS.join(', ')}` });
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  const token = process.env.PIPEDREAM_CALENDAR_TOKEN;
+  if (token != null && String(token).trim() !== '') {
+    headers.Authorization = `Bearer ${String(token).trim()}`;
+  }
+  const pdEnv = process.env.PIPEDREAM_ENVIRONMENT;
+  if (pdEnv != null && String(pdEnv).trim() !== '') {
+    headers['x-pd-environment'] = String(pdEnv).trim();
+  }
+  try {
+    const res = await fetch(String(url).trim(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ client_id, action, details }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return JSON.stringify({
+        error: `HTTP ${res.status}`,
+        body: text.length > 4000 ? `${text.slice(0, 4000)}…` : text,
+      });
+    }
+    return text.length > 12000 ? `${text.slice(0, 12000)}\n…[truncated]` : text;
+  } catch (err) {
+    return JSON.stringify({ error: err.message || String(err) });
+  }
+}
 
 function buildConnectionStatusReport(connections) {
   const list = connections || [];
@@ -249,6 +489,13 @@ async function executeComposioAction(toolInput, composioUserId) {
   if (!slug) {
     return JSON.stringify({ error: 'Missing tool_slug' });
   }
+  const slugStr = String(slug);
+  if (/\bCALENDAR\b|GCAL|OUTLOOK_?CAL|MICROSOFT_?CAL|FREE_?BUSY|BUSY_?READ|MEETING_?TIME|_EVENTS?\b|CREATE_?EVENT|LIST_?EVENT/i.test(slugStr)) {
+    return JSON.stringify({
+      error:
+        'Calendar and scheduling use execute_pipedream_calendar_task (not Composio). This tool is blocked for calendar-related slugs.',
+    });
+  }
   try {
     const res = await composio.tools.execute(slug, {
       arguments: typeof toolInput.arguments === 'object' && toolInput.arguments !== null ? toolInput.arguments : {},
@@ -269,11 +516,15 @@ async function executeComposioAction(toolInput, composioUserId) {
 async function getAgentTools(userId, options = {}) {
   const uid = String(userId);
   const subscriptionStatus = options.subscriptionStatus === 'PRO' ? 'PRO' : 'LITE';
+  const archProfileTools = getArchitectureProfileAnthropicTools();
+  const pipedreamCalendarTools = getPipedreamCalendarAnthropicTools();
+  const staticAnthropicTools = [...archProfileTools, ...pipedreamCalendarTools];
+
   if (!composio) {
     return {
       connections: [],
       availableTools: [],
-      anthropicTools: [],
+      anthropicTools: staticAnthropicTools,
       toolboxSummary: '',
     };
   }
@@ -307,7 +558,7 @@ async function getAgentTools(userId, options = {}) {
       }
     }
     const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
-    const anthropicTools = [];
+    const anthropicTools = [...staticAnthropicTools];
     if (connections.length > 0 && subscriptionStatus === 'PRO') {
       anthropicTools.push(EXECUTE_ACTION_ANTHROPIC_TOOL);
     }
@@ -322,7 +573,7 @@ async function getAgentTools(userId, options = {}) {
     return {
       connections: [],
       availableTools: [],
-      anthropicTools: [],
+      anthropicTools: staticAnthropicTools,
       toolboxSummary: '',
       error: err.message,
     };
@@ -536,7 +787,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -548,7 +799,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -593,11 +844,11 @@ async function getHybridResponseFromMessages(
       ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
       : '';
   const system = (baseSystemPrompt || ELITE_TRIAGE_SYSTEM_PROMPT) + composioSupplement;
-  const hasComposioTools = Boolean(toolbox?.anthropicTools?.length);
+  const hasAnthropicTools = Boolean(toolbox?.anthropicTools?.length);
 
   // --- TRY CLAUDE FIRST ---
   try {
-    if (hasComposioTools) {
+    if (hasAnthropicTools) {
       const conv = messages.map((m) => ({ role: m.role, content: m.content }));
       for (let step = 0; step < 6; step += 1) {
         const msg = await anthropic.messages.create({
@@ -616,20 +867,21 @@ async function getHybridResponseFromMessages(
         conv.push({ role: 'assistant', content: blocks });
         const results = [];
         for (const tu of toolUses) {
-          if (tu.name === 'execute_action') {
-            const payload = await executeComposioAction(tu.input, composioUserId);
-            results.push({
-              type: 'tool_result',
-              tool_use_id: tu.id,
-              content: payload,
-            });
+          let payload;
+          if (tu.name === 'fetch_architecture_profile') {
+            payload = await fetchArchitectureProfileFromPipedream(tu.input?.client_id);
+          } else if (tu.name === 'execute_pipedream_calendar_task') {
+            payload = await executePipedreamCalendarTask(tu.input);
+          } else if (tu.name === 'execute_action') {
+            payload = await executeComposioAction(tu.input, composioUserId);
           } else {
-            results.push({
-              type: 'tool_result',
-              tool_use_id: tu.id,
-              content: JSON.stringify({ error: `Unknown tool: ${tu.name}` }),
-            });
+            payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });
           }
+          results.push({
+            type: 'tool_result',
+            tool_use_id: tu.id,
+            content: payload,
+          });
         }
         conv.push({ role: 'user', content: results });
       }
@@ -789,17 +1041,50 @@ async function runAgenticConcierge(user, userMessage) {
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
 
+  const enrollAnchor = user.trial_start_date ?? user.created_at;
+  let daysSinceEnrollment = 'N/A';
+  let foundingMember180Window = false;
+  if (enrollAnchor) {
+    const en = new Date(enrollAnchor);
+    if (!Number.isNaN(en.getTime())) {
+      const d = Math.floor((Date.now() - en.getTime()) / (1000 * 60 * 60 * 24));
+      daysSinceEnrollment = String(d);
+      foundingMember180Window = d >= 0 && d <= 180;
+    }
+  }
+
+  const calendarOnboardingLink = await generateOnboardingLink(user.id);
+
+  const calProv =
+    user.calendar_provider != null && String(user.calendar_provider).trim() !== ''
+      ? String(user.calendar_provider).trim()
+      : 'N/A';
+  const autoAm =
+    user.active_automations != null && String(user.active_automations).trim() !== ''
+      ? String(user.active_automations).trim()
+      : 'N/A';
+  const archAt =
+    user.architecture_synced_at != null
+      ? new Date(user.architecture_synced_at).toISOString()
+      : 'N/A';
+
   const dynamicContext = `
 ### LIVE USER CONTEXT
 - user_id: ${user.id}
+- client_id: ${user.client_id != null && String(user.client_id).trim() !== '' ? user.client_id : 'N/A'}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
+- days_since_enrollment: ${daysSinceEnrollment}
+- founding_member_180_window: ${foundingMember180Window}
 - subscription_status: ${subscriptionStatus}
 - autonomous_execution_enabled: ${subscriptionStatus === 'PRO'}
 - connection_status: ${JSON.stringify(connectionReport)}
 - google_super_connected: ${googleSuperActive}
-- calendar_onboarding_link: ${generateOnboardingLink(user.id)}
+- calendar_onboarding_link: ${calendarOnboardingLink}
+- calendar_provider: ${calProv}
+- active_automations: ${autoAm}
+- architecture_synced_at: ${archAt}
 `;
   const lockedOverrideBlock = !googleSuperActive
     ? `
@@ -876,6 +1161,10 @@ async function getClaudeResponse(userTier, userMessage) {
  *   Content-Type: application/json
  *   x-pd-environment: development  // use "production" when you launch
  */
+/** Exact post-onboarding line: triggers server-side profile sync + obligates Alice to call fetch_architecture_profile in-thread when needed. */
+const SYSTEMS_SYNC_HANDSHAKE_PHRASE =
+  "I've now connected my calendar and enabled my automations - please sync systems to activate.";
+
 const HANDSHAKE_VERIFICATION_INCOMING_MESSAGE =
   'Handshake complete. I have successfully connected my calendar.';
 
@@ -925,15 +1214,41 @@ app.post('/webhook', async (req, res) => {
       const cid = await ensureClientIdForUser(user.id);
       if (cid) user.client_id = cid;
     }
+    if (!user.short_id) {
+      const sid = await ensureShortIdForUser(user.id);
+      if (sid) user.short_id = sid;
+    }
     console.log('Status: User identified as:', user.tier);
 
     const incomingText = String(req.body.Body || '').trim();
 
+    // Systems-sync phrase: pull architecture profile into Postgres + LIVE USER CONTEXT, then continue to agent
+    if (incomingText === SYSTEMS_SYNC_HANDSHAKE_PHRASE) {
+      if (user.client_id && process.env.FETCH_ARCHITECTURE_PROFILE_URL) {
+        const raw = await fetchArchitectureProfileFromPipedream(user.client_id);
+        const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw);
+        if (persisted) {
+          user.calendar_provider = persisted.calendarProvider;
+          user.active_automations = persisted.activeAutomations;
+          user.architecture_synced_at = new Date();
+        }
+        console.log('[SYNC] Systems-sync handshake; architecture profile pull attempted for user:', user.id);
+      } else {
+        console.warn('[SYNC] Systems-sync phrase but missing client_id or FETCH_ARCHITECTURE_PROFILE_URL');
+      }
+    }
+
     // Handshake verification (exact message — skips normal agent flow)
     if (incomingText === HANDSHAKE_VERIFICATION_INCOMING_MESSAGE) {
-      await pool.query('UPDATE users SET google_super_connected = true WHERE id = $1', [user.id]);
-      user.google_super_connected = true;
-      console.log('[VERIFICATION] Handshake confirmed for user: ' + user.id);
+      const shortId = await ensureShortIdForUser(user.id);
+      if (shortId) user.short_id = shortId;
+      console.log(`[VERIFICATION] Handshake detected for: ${phoneNumber}`);
+      if (!shortId) {
+        console.error('[VERIFICATION] short_id could not be assigned; google_super_connected not updated');
+      } else {
+        await pool.query('UPDATE users SET google_super_connected = true WHERE short_id = $1', [shortId]);
+        user.google_super_connected = true;
+      }
       await saveConversation(user.id, incomingText, HANDSHAKE_VERIFIED_ALICE_RESPONSE, {
         trigger: 'handshake_verification',
       });
