@@ -49,26 +49,32 @@ app.post(
       return;
     }
     if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-      const phone = session.metadata?.phone || null;
-      const email = session.metadata?.email || session.customer_email || session.customer_details?.email || null;
-      let user = null;
-      if (phone) {
-        const byPhone = await pool.query('SELECT id, phone_number, email FROM users WHERE phone_number = $1', [phone]);
-        user = byPhone.rows[0] || null;
-      }
-      if (!user && email) {
-        const byEmail = await pool.query('SELECT id, phone_number, email FROM users WHERE email = $1', [email]);
-        user = byEmail.rows[0] || null;
-      }
-      if (user) {
-        await pool.query('UPDATE users SET tier = $1, subscription_status = $2 WHERE id = $3', [
-          'pro',
-          'PRO',
-          user.id,
-        ]);
-        const identifier = user.phone_number || user.email || user.id;
-        console.log(`User [${identifier}] upgraded to PRO tier.`);
+      try {
+        const session = event.data.object;
+        const phone = session.metadata?.phone || null;
+        const email = session.metadata?.email || session.customer_email || session.customer_details?.email || null;
+        let user = null;
+        if (phone) {
+          const byPhone = await pool.query('SELECT id, phone_number, email FROM users WHERE phone_number = $1', [phone]);
+          user = byPhone.rows[0] || null;
+        }
+        if (!user && email) {
+          const byEmail = await pool.query('SELECT id, phone_number, email FROM users WHERE email = $1', [email]);
+          user = byEmail.rows[0] || null;
+        }
+        if (user) {
+          await pool.query('UPDATE users SET tier = $1, subscription_status = $2 WHERE id = $3', [
+            'pro',
+            'PRO',
+            user.id,
+          ]);
+          const identifier = user.phone_number || user.email || user.id;
+          console.log(`User [${identifier}] upgraded to PRO tier.`);
+        }
+      } catch (err) {
+        // Do not let a transient DB error become an unhandled rejection (process crash).
+        // Return 200 so Stripe does not endlessly retry; rely on logs/alerting to reconcile.
+        console.error('Stripe webhook DB update failed:', err.message);
       }
       res.json({ received: true });
       return;
@@ -125,7 +131,12 @@ const googleAI = new GoogleGenAI(process.env.GEMINI_API_KEY);
 
 function getMasterSkill() {
   const skillPath = path.join(__dirname, 'skills', 'sovereign_architect.md');
-  return fs.readFileSync(skillPath, 'utf8');
+  try {
+    return fs.readFileSync(skillPath, 'utf8');
+  } catch (err) {
+    console.error('Master skill file missing/unreadable:', err.message);
+    return '';
+  }
 }
 
 /** Days since start (trial anchor). Uses absolute calendar diff; invalid/missing dates return null. */
@@ -321,6 +332,7 @@ async function fetchArchitectureProfileFromPipedream(clientId) {
       method: 'POST',
       headers,
       body: JSON.stringify({ client_id: cid }),
+      signal: AbortSignal.timeout(10000),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -452,6 +464,7 @@ async function executePipedreamCalendarTask(input) {
       method: 'POST',
       headers,
       body: JSON.stringify({ client_id, action, details }),
+      signal: AbortSignal.timeout(10000),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -1071,7 +1084,10 @@ async function runAgenticConcierge(user, userMessage) {
   const dynamicContext = `
 ### LIVE USER CONTEXT
 - user_id: ${user.id}
-- client_id: ${user.client_id != null && String(user.client_id).trim() !== '' ? user.client_id : 'N/A'}
+- client_id: ${(() => {
+    const onboardingId = user.short_id || user.client_id;
+    return onboardingId != null && String(onboardingId).trim() !== '' ? onboardingId : 'N/A';
+  })()}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
@@ -1194,6 +1210,25 @@ app.post('/webhook', async (req, res) => {
   console.log('From:', req.body.From);
   console.log('Body:', req.body.Body);
 
+  // Reject forged requests: validate Twilio's X-Twilio-Signature against the public webhook URL.
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (authToken) {
+    const twilioSignature = req.headers['x-twilio-signature'];
+    const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+    const webhookUrl = `${base}/webhook`;
+    const valid =
+      Boolean(base) &&
+      Boolean(twilioSignature) &&
+      twilio.validateRequest(authToken, twilioSignature, webhookUrl, req.body || {});
+    if (!valid) {
+      console.warn('[SECURITY] Rejected /webhook with invalid Twilio signature from', req.body?.From);
+      res.status(403).send('Invalid signature');
+      return;
+    }
+  } else {
+    console.warn('[SECURITY] TWILIO_AUTH_TOKEN not set; skipping Twilio signature validation');
+  }
+
   try {
     // 1. Database Check
     console.log('Status: Checking Database...');
@@ -1224,8 +1259,10 @@ app.post('/webhook', async (req, res) => {
 
     // Systems-sync phrase: pull architecture profile into Postgres + LIVE USER CONTEXT, then continue to agent
     if (incomingText === SYSTEMS_SYNC_HANDSHAKE_PHRASE) {
-      if (user.client_id && process.env.FETCH_ARCHITECTURE_PROFILE_URL) {
-        const raw = await fetchArchitectureProfileFromPipedream(user.client_id);
+      // short_id is the universal onboarding identifier (matches the onboarding link + Airtable/Pipedream registry key)
+      const onboardingId = user.short_id || user.client_id;
+      if (onboardingId && process.env.FETCH_ARCHITECTURE_PROFILE_URL) {
+        const raw = await fetchArchitectureProfileFromPipedream(onboardingId);
         const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw);
         if (persisted) {
           user.calendar_provider = persisted.calendarProvider;
@@ -1234,7 +1271,7 @@ app.post('/webhook', async (req, res) => {
         }
         console.log('[SYNC] Systems-sync handshake; architecture profile pull attempted for user:', user.id);
       } else {
-        console.warn('[SYNC] Systems-sync phrase but missing client_id or FETCH_ARCHITECTURE_PROFILE_URL');
+        console.warn('[SYNC] Systems-sync phrase but missing short_id/client_id or FETCH_ARCHITECTURE_PROFILE_URL');
       }
     }
 
@@ -1507,6 +1544,11 @@ app.get('/portal', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ai-life-concierge' });
+});
+
+// Safety net: log instead of crashing on any stray unhandled promise rejection.
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason instanceof Error ? reason.message : reason);
 });
 
 const PORT = process.env.PORT || 8080; // Changed to 8080 for Railway
