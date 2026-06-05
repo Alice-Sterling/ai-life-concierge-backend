@@ -232,6 +232,42 @@ Calendar / Vault connection (web onboarding only):
 - When the user asks to connect their calendar, sync Google, or open the Vault (and that is the main request), respond with exactly this sentence, substituting the URL from LIVE USER CONTEXT (field calendar_onboarding_link) for [LINK] — output the full URL with no modification:
 I've prepared your secure vault access. Please complete the handshake here to sync your calendar: [LINK]
 
+### CONVERSATIONAL ONBOARDING PROTOCOL
+Trigger: If LIVE USER CONTEXT shows Onboarding Status: pending or Email: N/A.
+Execution: You must guide the user through a frictionless onboarding. DO NOT send a wall of text or multiple questions at once. Ask exactly ONE phase at a time. Wait for the user's reply before proceeding. Frame questions around unlocking value.
+
+Phase 1 (Identity): 'Welcome to the AI Life Concierge. I am Alice. To initialize your secure profile, please reply with your first and last name, and your preferred email.'
+
+Phase 2 (Profile): Acknowledge their name. Ask: 'To calibrate my execution to your specific lifestyle, which profile best fits you? (Reply 1-4)
+
+Founder / CEO
+
+Executive / Professional
+
+Investor / Family Office
+
+Creative / Artist'
+
+Phase 3 (Friction / Value): Map their numeric reply to the occupation. Then ask: 'Understood. Where can I deploy immediate value and remove friction for you today? (Reply 1-4)
+
+Relationship & Milestone Management
+
+Event & Lifestyle Curation
+
+Bespoke Sourcing
+
+Coordinating Logistics'
+
+Phase 4 (Commitment): Map their numeric reply. Then ask: 'Finally, how should we structure our partnership? (Reply 1-3)
+
+I need a fully-managed lifestyle partner
+
+I am interested in self-hosted/DIY AI tools
+
+I am exploring options for my team/office'
+
+Phase 5 (Execution): Map their final reply. Say: 'Profile architected successfully. I am ready for your first request.' Immediately call the save_onboarding_profile tool with the translated string values (do not pass the raw numbers to the tool).
+
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
 
@@ -259,6 +295,36 @@ function formatToolboxSummary(connections, availableTools) {
 
 /** Composio toolkit slug for unified Google (Gmail + Calendar) — must be ACTIVE before Gmail/Calendar execute_action. */
 const GOOGLE_SUPER_TOOLKIT = 'google_super';
+
+const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
+  name: 'save_onboarding_profile',
+  description:
+    'Persist completed conversational onboarding: identity, profile, friction focus, and partnership commitment. Call only after Phase 5 with human-readable string values (not numeric menu codes).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      first_name: { type: 'string', description: 'User first name.' },
+      last_name: { type: 'string', description: 'User last name.' },
+      email: { type: 'string', description: 'User preferred email.' },
+      occupation: {
+        type: 'string',
+        description:
+          'Profile label: Founder / CEO, Executive / Professional, Investor / Family Office, or Creative / Artist.',
+      },
+      friction_points: {
+        type: 'string',
+        description:
+          'Value focus: Relationship & Milestone Management, Event & Lifestyle Curation, Bespoke Sourcing, or Coordinating Logistics.',
+      },
+      service_commitment: {
+        type: 'string',
+        description:
+          'Partnership structure: fully-managed lifestyle partner, self-hosted/DIY AI tools, or team/office exploration.',
+      },
+    },
+    required: ['first_name', 'last_name', 'email', 'occupation', 'friction_points', 'service_commitment'],
+  },
+};
 
 const EXECUTE_ACTION_ANTHROPIC_TOOL = {
   name: 'execute_action',
@@ -494,6 +560,58 @@ function buildConnectionStatusReport(connections) {
   return { active_integrations, locked_integrations };
 }
 
+async function saveOnboardingProfile(userId, toolInput) {
+  const first_name = String(toolInput?.first_name ?? '').trim();
+  const last_name = String(toolInput?.last_name ?? '').trim();
+  const email = String(toolInput?.email ?? '').trim();
+  const occupation = String(toolInput?.occupation ?? '').trim();
+  const friction_points = String(toolInput?.friction_points ?? '').trim();
+  const service_commitment = String(toolInput?.service_commitment ?? '').trim();
+
+  await pool.query(
+    `UPDATE users
+     SET first_name = $1, last_name = $2, email = $3, onboarding_status = 'complete'
+     WHERE id = $4`,
+    [first_name, last_name, email, userId]
+  );
+
+  const { rows } = await pool.query(
+    'SELECT phone_number, COALESCE(short_id, client_id) AS short_id FROM users WHERE id = $1',
+    [userId]
+  );
+  const userRow = rows[0] || {};
+
+  const webhookUrl = process.env.PIPEDREAM_ONBOARDING_WEBHOOK_URL;
+  if (webhookUrl) {
+    try {
+      const payload = {
+        first_name,
+        last_name,
+        email,
+        occupation,
+        friction_points,
+        service_commitment,
+        phone_number: userRow.phone_number ?? null,
+        short_id: userRow.short_id ?? null,
+      };
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (err) {
+      console.error('[ONBOARDING] Pipedream webhook failed:', err?.message || err);
+    }
+  }
+
+  return JSON.stringify({
+    success: true,
+    message:
+      'Onboarding profile committed to the database (onboarding_status: complete). Intake webhook dispatched when configured.',
+  });
+}
+
 async function executeComposioAction(toolInput, composioUserId) {
   if (!composio) {
     return JSON.stringify({ error: 'Composio is not configured' });
@@ -531,7 +649,11 @@ async function getAgentTools(userId, options = {}) {
   const subscriptionStatus = options.subscriptionStatus === 'PRO' ? 'PRO' : 'LITE';
   const archProfileTools = getArchitectureProfileAnthropicTools();
   const pipedreamCalendarTools = getPipedreamCalendarAnthropicTools();
-  const staticAnthropicTools = [...archProfileTools, ...pipedreamCalendarTools];
+  const staticAnthropicTools = [
+    ...archProfileTools,
+    ...pipedreamCalendarTools,
+    SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
+  ];
 
   if (!composio) {
     return {
@@ -800,7 +922,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -812,7 +934,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -887,6 +1009,8 @@ async function getHybridResponseFromMessages(
             payload = await executePipedreamCalendarTask(tu.input);
           } else if (tu.name === 'execute_action') {
             payload = await executeComposioAction(tu.input, composioUserId);
+          } else if (tu.name === 'save_onboarding_profile') {
+            payload = await saveOnboardingProfile(composioUserId, tu.input);
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });
           }
@@ -1080,6 +1204,10 @@ async function runAgenticConcierge(user, userMessage) {
     user.architecture_synced_at != null
       ? new Date(user.architecture_synced_at).toISOString()
       : 'N/A';
+  const onboardingStatus =
+    user.onboarding_status != null && String(user.onboarding_status).trim() !== ''
+      ? String(user.onboarding_status).trim()
+      : 'pending';
 
   const dynamicContext = `
 ### LIVE USER CONTEXT
@@ -1088,6 +1216,9 @@ async function runAgenticConcierge(user, userMessage) {
     const onboardingId = user.short_id || user.client_id;
     return onboardingId != null && String(onboardingId).trim() !== '' ? onboardingId : 'N/A';
   })()}
+- Email: ${user.email != null && String(user.email).trim() !== '' ? user.email : 'N/A'}
+- First Name: ${user.first_name != null && String(user.first_name).trim() !== '' ? user.first_name : 'N/A'}
+- Onboarding Status: ${onboardingStatus}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}

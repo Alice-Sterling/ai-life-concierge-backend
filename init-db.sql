@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
   last_nudge_at TIMESTAMPTZ,
   trial_start_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   subscription_status TEXT NOT NULL DEFAULT 'LITE',
+  onboarding_status VARCHAR(32) NOT NULL DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -74,6 +75,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS total_fee NUMERIC(14, 2);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_automations TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS lifestyle_architect BOOLEAN;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_status VARCHAR(32) NOT NULL DEFAULT 'pending';
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);
