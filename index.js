@@ -266,7 +266,18 @@ I am interested in self-hosted/DIY AI tools
 
 I am exploring options for my team/office'
 
-Phase 5 (Execution): Map their final reply. Say: 'Profile architected successfully. I am ready for your first request.' Immediately call the save_onboarding_profile tool with the translated string values (do not pass the raw numbers to the tool).
+Phase 5 (Calendar Connection — mandatory gate): Acknowledge their partnership choice. You MUST NOT pitch automations or call save_onboarding_profile until the calendar is connected. Deliver the secure Vault link using the exact sentence from "Calendar / Vault connection" above, substituting calendar_onboarding_link from LIVE USER CONTEXT for [LINK]. Tell them that connecting their calendar is the master key that unlocks autonomous execution. Wait for their reply. If LIVE USER CONTEXT shows google_super_connected is false, you remain at this phase — re-send the link politely if they have not completed OAuth; do not advance.
+
+Phase 6 (Systems Verification): Once google_super_connected is true (or after the user sends the exact systems-sync phrase: I've now connected my calendar and enabled my automations - please sync systems to activate.), you MUST call fetch_architecture_profile with client_id from LIVE USER CONTEXT before proceeding. Confirm calendar_provider and active_automations are reflected in LIVE USER CONTEXT. Do not skip this verification step.
+
+Phase 7 (Automation Pitch — post-verification only): Immediately after calendar verification, transition to pitching flagship automations before profile commit. One message at a time. Explain that their connected calendar unlocks our first three flagship automations:
+• Date Night (slug: date_night): Automated bi-weekly recommendations, calendar conflict checking, and booking.
+• Gifting (slug: gifting): Tracking key dates for partners and clients with automated curation.
+• Travel Logistics (slug: travel_logistics): Auto-detecting flights, managing itinerary buffers, and ground transport.
+
+Dynamic pitching: Lead with the automation that best resolves the friction_points they chose in Phase 3 — Relationship & Milestone Management → prioritize Gifting and Date Night; Event & Lifestyle Curation → Date Night; Bespoke Sourcing → Gifting; Coordinating Logistics → Travel Logistics. Ask which of the three they want activated now (they may choose one, two, or all three). Mention that while these three are available immediately, you will continue building custom automations and gathering deeper preferences as the partnership evolves. Wait for explicit agreement before advancing.
+
+Phase 8 (Profile Commit): Map their automation choices to slug strings only (date_night, gifting, travel_logistics). Say: 'Profile architected successfully. I am ready for your first request.' Immediately call save_onboarding_profile with the translated string values from Phases 1–4 (do not pass raw menu numbers), plus enabled_automations populated with every automation slug they explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting"]). Omit slugs they declined.
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
@@ -299,7 +310,7 @@ const GOOGLE_SUPER_TOOLKIT = 'google_super';
 const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
   name: 'save_onboarding_profile',
   description:
-    'Persist completed conversational onboarding: identity, profile, friction focus, and partnership commitment. Call only after Phase 5 with human-readable string values (not numeric menu codes).',
+    'Persist completed conversational onboarding: identity, profile, friction focus, partnership commitment, and automation slugs agreed in Phase 7. Call only after Phase 8 (calendar verified, automation pitch complete) with human-readable string values (not numeric menu codes).',
   input_schema: {
     type: 'object',
     properties: {
@@ -325,7 +336,7 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'Optional. Active automation slugs (e.g. ["date_night", "gifting"]). Defaults to empty array.',
+          'Automation slugs the user explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting", "travel_logistics"]). Required at profile commit when automations were pitched.',
       },
       preferences: {
         type: 'object',
