@@ -576,39 +576,76 @@ async function saveOnboardingProfile(userId, toolInput) {
   );
 
   const { rows } = await pool.query(
-    'SELECT phone_number, COALESCE(short_id, client_id) AS short_id FROM users WHERE id = $1',
+    'SELECT phone_number, short_id, client_id FROM users WHERE id = $1',
     [userId]
   );
   const userRow = rows[0] || {};
+  const phone_number = userRow.phone_number ?? null;
+  const clientIdForAirtable = userRow.short_id || userRow.client_id || null;
 
-  const webhookUrl = process.env.PIPEDREAM_ONBOARDING_WEBHOOK_URL;
-  if (webhookUrl) {
+  const sendGridKey = process.env.SENDGRID_API_KEY;
+  if (sendGridKey && email) {
     try {
-      const payload = {
-        first_name,
-        last_name,
-        email,
-        occupation,
-        friction_points,
-        service_commitment,
-        phone_number: userRow.phone_number ?? null,
-        short_id: userRow.short_id ?? null,
-      };
-      await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10000),
+      const sendGridRes = await fetch('https://api.sendgrid.com/v3/marketing/contacts', {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${sendGridKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contacts: [{ email, first_name, last_name }],
+        }),
       });
+      if (!sendGridRes.ok) {
+        const text = await sendGridRes.text();
+        console.error('[ONBOARDING] SendGrid HTTP', sendGridRes.status, text.slice(0, 500));
+      }
     } catch (err) {
-      console.error('[ONBOARDING] Pipedream webhook failed:', err?.message || err);
+      console.error('[ONBOARDING] SendGrid sync failed:', err?.message || err);
+    }
+  }
+
+  const airtableKey = process.env.AIRTABLE_API_KEY;
+  const airtableBaseId =
+    process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
+  const airtableTableName =
+    process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
+  if (airtableKey && airtableBaseId && airtableTableName) {
+    try {
+      const airtableUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
+      const airtableRes = await fetch(airtableUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${airtableKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          records: [
+            {
+              fields: {
+                'Client ID': clientIdForAirtable,
+                'Phone Number': phone_number,
+                Occupation: occupation,
+                'Friction Points': friction_points,
+                'Service Commitment': service_commitment,
+              },
+            },
+          ],
+        }),
+      });
+      if (!airtableRes.ok) {
+        const text = await airtableRes.text();
+        console.error('[ONBOARDING] Airtable HTTP', airtableRes.status, text.slice(0, 500));
+      }
+    } catch (err) {
+      console.error('[ONBOARDING] Airtable sync failed:', err?.message || err);
     }
   }
 
   return JSON.stringify({
     success: true,
     message:
-      'Onboarding profile committed to the database (onboarding_status: complete). Intake webhook dispatched when configured.',
+      'Onboarding profile committed to the database (onboarding_status: complete). Marketing and operational records synced when configured.',
   });
 }
 
