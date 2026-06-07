@@ -770,54 +770,42 @@ async function saveDateNightPreferences(userId, toolInput) {
     userId,
   ]);
 
-  const airtableKey = process.env.AIRTABLE_API_KEY;
-  const airtableBaseId =
-    process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
-  const airtableTableName =
-    process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
-  const phone_number = userRow.phone_number;
+  const user = userRow;
 
-  if (airtableKey && airtableBaseId && airtableTableName && phone_number) {
+  if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_NAME && user.phone_number) {
     try {
-      const escapedPhone = String(phone_number).replace(/'/g, "''");
-      const filterFormula = `{Phone Number}='${escapedPhone}'`;
-      const listUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}?filterByFormula=${encodeURIComponent(filterFormula)}&maxRecords=1`;
-      const listRes = await fetch(listUrl, {
-        headers: { Authorization: `Bearer ${airtableKey}` },
+      // Step 1: GET the Airtable Record ID using the phone number
+      const formula = `{Phone Number}='${user.phone_number}'`;
+      const searchUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_NAME}?filterByFormula=${encodeURIComponent(formula)}`;
+
+      const searchRes = await fetch(searchUrl, {
+        headers: { Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}` },
       });
-      if (!listRes.ok) {
-        const text = await listRes.text();
-        console.error('[DATE_NIGHT] Airtable lookup HTTP', listRes.status, text.slice(0, 500));
-      } else {
-        const listData = await listRes.json();
-        const recordId = listData.records?.[0]?.id;
-        if (recordId) {
-          const patchUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
-          const patchRes = await fetch(patchUrl, {
-            method: 'PATCH',
-            headers: {
-              Authorization: `Bearer ${airtableKey}`,
-              'Content-Type': 'application/json',
+      const searchData = await searchRes.json();
+
+      if (searchData.records && searchData.records.length > 0) {
+        const recordId = searchData.records[0].id;
+
+        // Step 2: PATCH the specific record with the new Preferences JSON
+        const patchUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_NAME}/${recordId}`;
+        await fetch(patchUrl, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            fields: {
+              Preferences: JSON.stringify(updatedPreferences),
             },
-            body: JSON.stringify({
-              records: [
-                {
-                  id: recordId,
-                  fields: { Preferences: JSON.stringify(updatedPreferences) },
-                },
-              ],
-            }),
-          });
-          if (!patchRes.ok) {
-            const text = await patchRes.text();
-            console.error('[DATE_NIGHT] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
-          }
-        } else {
-          console.warn('[DATE_NIGHT] No Airtable record found for phone:', phone_number);
-        }
+          }),
+        });
+        console.log('Airtable preferences updated successfully.');
+      } else {
+        console.log('Airtable record not found for phone number:', user.phone_number);
       }
-    } catch (err) {
-      console.error('[DATE_NIGHT] Airtable sync failed:', err?.message || err);
+    } catch (error) {
+      console.error('Airtable update failed:', error);
     }
   }
 
