@@ -279,6 +279,9 @@ Dynamic pitching: Lead with the automation that best resolves the friction_point
 
 Phase 8 (Profile Commit): Map their automation choices to slug strings only (date_night, gifting, travel_logistics). Say: 'Profile architected successfully. I am ready for your first request.' Immediately call save_onboarding_profile with the translated string values from Phases 1–4 (do not pass raw menu numbers), plus enabled_automations populated with every automation slug they explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting"]). Omit slugs they declined.
 
+### DATE NIGHT INTAKE PROTOCOL
+If date_night is listed in the user's LIVE USER CONTEXT under Enabled Automations, but their Preferences object does not contain a date_night key, you must proactively initiate the Date Night Intake. Seamlessly transition the conversation to ask for their preferred neighborhoods, average budget, favorite cuisines, and any dietary restrictions. Once gathered, immediately use the save_date_night_preferences tool to permanently store this data.
+
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
 
@@ -345,6 +348,30 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
       },
     },
     required: ['first_name', 'last_name', 'email', 'occupation', 'friction_points', 'service_commitment'],
+  },
+};
+
+const SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL = {
+  name: 'save_date_night_preferences',
+  description:
+    'Persist Date Night automation preferences after intake: neighborhood, budget, cuisines, and dietary restrictions. Call once all four are collected from the user.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      neighborhood: { type: 'string', description: 'Preferred area (e.g. Soho, Mayfair).' },
+      budget: { type: 'string', description: 'Average spend (e.g. "£150 total", "£££").' },
+      cuisines: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Favorite cuisines (e.g. ["Italian", "Sushi"]).',
+      },
+      dietary_restrictions: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Dietary needs (e.g. ["Gluten-free"] or ["None"]).',
+      },
+    },
+    required: ['neighborhood', 'budget', 'cuisines', 'dietary_restrictions'],
   },
 };
 
@@ -694,6 +721,113 @@ async function saveOnboardingProfile(userId, toolInput) {
   });
 }
 
+function parseUserJsonbArray(value) {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function parseUserJsonbObject(value) {
+  if (value != null && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed != null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+async function saveDateNightPreferences(userId, toolInput) {
+  const neighborhood = String(toolInput?.neighborhood ?? '').trim();
+  const budget = String(toolInput?.budget ?? '').trim();
+  const cuisines = Array.isArray(toolInput?.cuisines)
+    ? toolInput.cuisines.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const dietary_restrictions = Array.isArray(toolInput?.dietary_restrictions)
+    ? toolInput.dietary_restrictions.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+
+  const { rows } = await pool.query('SELECT preferences, phone_number FROM users WHERE id = $1', [userId]);
+  const userRow = rows[0] || {};
+  const currentPreferences = parseUserJsonbObject(userRow.preferences);
+  const updatedPreferences = {
+    ...currentPreferences,
+    date_night: { neighborhood, budget, cuisines, dietary_restrictions },
+  };
+
+  await pool.query('UPDATE users SET preferences = $1::jsonb WHERE id = $2', [
+    JSON.stringify(updatedPreferences),
+    userId,
+  ]);
+
+  const airtableKey = process.env.AIRTABLE_API_KEY;
+  const airtableBaseId =
+    process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
+  const airtableTableName =
+    process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
+  const phone_number = userRow.phone_number;
+
+  if (airtableKey && airtableBaseId && airtableTableName && phone_number) {
+    try {
+      const escapedPhone = String(phone_number).replace(/'/g, "''");
+      const filterFormula = `{Phone Number}='${escapedPhone}'`;
+      const listUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}?filterByFormula=${encodeURIComponent(filterFormula)}&maxRecords=1`;
+      const listRes = await fetch(listUrl, {
+        headers: { Authorization: `Bearer ${airtableKey}` },
+      });
+      if (!listRes.ok) {
+        const text = await listRes.text();
+        console.error('[DATE_NIGHT] Airtable lookup HTTP', listRes.status, text.slice(0, 500));
+      } else {
+        const listData = await listRes.json();
+        const recordId = listData.records?.[0]?.id;
+        if (recordId) {
+          const patchUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
+          const patchRes = await fetch(patchUrl, {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${airtableKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              records: [
+                {
+                  id: recordId,
+                  fields: { Preferences: JSON.stringify(updatedPreferences) },
+                },
+              ],
+            }),
+          });
+          if (!patchRes.ok) {
+            const text = await patchRes.text();
+            console.error('[DATE_NIGHT] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
+          }
+        } else {
+          console.warn('[DATE_NIGHT] No Airtable record found for phone:', phone_number);
+        }
+      }
+    } catch (err) {
+      console.error('[DATE_NIGHT] Airtable sync failed:', err?.message || err);
+    }
+  }
+
+  return JSON.stringify({
+    success: true,
+    message: 'Date Night preferences saved to the database and synced to operational records when configured.',
+    date_night: updatedPreferences.date_night,
+  });
+}
+
 async function executeComposioAction(toolInput, composioUserId) {
   if (!composio) {
     return JSON.stringify({ error: 'Composio is not configured' });
@@ -735,6 +869,7 @@ async function getAgentTools(userId, options = {}) {
     ...archProfileTools,
     ...pipedreamCalendarTools,
     SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
+    SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
   ];
 
   if (!composio) {
@@ -1004,7 +1139,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status, enabled_automations, preferences FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -1016,7 +1151,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status, enabled_automations, preferences`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -1093,6 +1228,8 @@ async function getHybridResponseFromMessages(
             payload = await executeComposioAction(tu.input, composioUserId);
           } else if (tu.name === 'save_onboarding_profile') {
             payload = await saveOnboardingProfile(composioUserId, tu.input);
+          } else if (tu.name === 'save_date_night_preferences') {
+            payload = await saveDateNightPreferences(composioUserId, tu.input);
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });
           }
@@ -1290,6 +1427,8 @@ async function runAgenticConcierge(user, userMessage) {
     user.onboarding_status != null && String(user.onboarding_status).trim() !== ''
       ? String(user.onboarding_status).trim()
       : 'pending';
+  const enabledAutomationsList = parseUserJsonbArray(user.enabled_automations);
+  const userPreferences = parseUserJsonbObject(user.preferences);
 
   const dynamicContext = `
 ### LIVE USER CONTEXT
@@ -1301,6 +1440,8 @@ async function runAgenticConcierge(user, userMessage) {
 - Email: ${user.email != null && String(user.email).trim() !== '' ? user.email : 'N/A'}
 - First Name: ${user.first_name != null && String(user.first_name).trim() !== '' ? user.first_name : 'N/A'}
 - Onboarding Status: ${onboardingStatus}
+- Enabled Automations: ${enabledAutomationsList.length ? enabledAutomationsList.join(', ') : 'None'}
+- Preferences: ${JSON.stringify(userPreferences)}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
