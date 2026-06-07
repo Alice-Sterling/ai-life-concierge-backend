@@ -694,7 +694,7 @@ async function saveOnboardingProfile(userId, toolInput) {
             {
               fields: {
                 'Client ID': clientIdForAirtable,
-                'Phone Number': phone_number,
+                phone_number: phone_number ? String(phone_number).replace(/^whatsapp:/i, '') : phone_number,
                 Occupation: occupation,
                 'Friction Points': friction_points,
                 'Service Commitment': service_commitment,
@@ -774,8 +774,9 @@ async function saveDateNightPreferences(userId, toolInput) {
 
   if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_NAME && user.phone_number) {
     try {
-      // Step 1: GET the Airtable Record ID using the phone number
-      const formula = `{Phone Number}='${user.phone_number}'`;
+      // Step 1: Clean the phone number and GET the Airtable Record ID
+      const cleanPhoneNumber = user.phone_number.replace('whatsapp:', '');
+      const formula = `{phone_number}='${cleanPhoneNumber}'`;
       const searchUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_NAME}?filterByFormula=${encodeURIComponent(formula)}`;
 
       const searchRes = await fetch(searchUrl, {
@@ -966,7 +967,7 @@ function buildAirtableRecordFields({ client_id, phone_number, email, tier, last_
     if (v != null && String(v).trim() !== '') return String(v).trim();
     return fallback;
   };
-  const phoneColumn = pick('AIRTABLE_PHONE_FIELD', 'Phone Number');
+  const phoneColumn = pick('AIRTABLE_PHONE_FIELD', 'phone_number');
   const emailField = pick('AIRTABLE_EMAIL_FIELD', 'Email');
   const tierField = pick('AIRTABLE_TIER_FIELD', 'Tier');
   const lastMsgField = pick('AIRTABLE_LAST_MESSAGE_FIELD', 'Last Message');
