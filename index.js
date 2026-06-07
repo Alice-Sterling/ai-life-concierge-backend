@@ -321,6 +321,17 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
         description:
           'Partnership structure: fully-managed lifestyle partner, self-hosted/DIY AI tools, or team/office exploration.',
       },
+      enabled_automations: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Optional. Active automation slugs (e.g. ["date_night", "gifting"]). Defaults to empty array.',
+      },
+      preferences: {
+        type: 'object',
+        description:
+          'Optional. Nested key-value automation preferences (e.g. date_night cuisine, budget). Defaults to empty object.',
+      },
     },
     required: ['first_name', 'last_name', 'email', 'occupation', 'friction_points', 'service_commitment'],
   },
@@ -567,12 +578,33 @@ async function saveOnboardingProfile(userId, toolInput) {
   const occupation = String(toolInput?.occupation ?? '').trim();
   const friction_points = String(toolInput?.friction_points ?? '').trim();
   const service_commitment = String(toolInput?.service_commitment ?? '').trim();
+  const enabled_automations = Array.isArray(toolInput?.enabled_automations)
+    ? toolInput.enabled_automations.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const preferences =
+    toolInput?.preferences != null &&
+    typeof toolInput.preferences === 'object' &&
+    !Array.isArray(toolInput.preferences)
+      ? toolInput.preferences
+      : {};
 
   await pool.query(
     `UPDATE users
-     SET first_name = $1, last_name = $2, email = $3, onboarding_status = 'complete'
+     SET first_name = $1,
+         last_name = $2,
+         email = $3,
+         onboarding_status = 'complete',
+         enabled_automations = $5::jsonb,
+         preferences = $6::jsonb
      WHERE id = $4`,
-    [first_name, last_name, email, userId]
+    [
+      first_name,
+      last_name,
+      email,
+      userId,
+      JSON.stringify(enabled_automations),
+      JSON.stringify(preferences),
+    ]
   );
 
   const { rows } = await pool.query(
@@ -628,6 +660,8 @@ async function saveOnboardingProfile(userId, toolInput) {
                 Occupation: occupation,
                 'Friction Points': friction_points,
                 'Service Commitment': service_commitment,
+                'Enabled Automations': JSON.stringify(enabled_automations || []),
+                Preferences: JSON.stringify(preferences || {}),
               },
             },
           ],
