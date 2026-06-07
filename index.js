@@ -327,8 +327,14 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
       },
       friction_points: {
         type: 'string',
+        enum: [
+          'Coordinating Logistics',
+          'Bespoke Sourcing',
+          'Event & Lifestyle Curation',
+          'Relationship & Milestone Management',
+        ],
         description:
-          'Value focus: Relationship & Milestone Management, Event & Lifestyle Curation, Bespoke Sourcing, or Coordinating Logistics.',
+          "You MUST categorize the user's primary friction point into exactly one of these pre-approved categories. Do not invent your own category.",
       },
       service_commitment: {
         type: 'string',
@@ -650,7 +656,6 @@ async function saveOnboardingProfile(userId, toolInput) {
     [userId]
   );
   const userRow = rows[0] || {};
-  const phone_number = userRow.phone_number ?? null;
   const clientIdForAirtable = userRow.short_id || userRow.client_id || null;
 
   const sendGridKey = process.env.SENDGRID_API_KEY;
@@ -682,32 +687,68 @@ async function saveOnboardingProfile(userId, toolInput) {
     process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
   if (airtableKey && airtableBaseId && airtableTableName) {
     try {
-      const airtableUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
-      const airtableRes = await fetch(airtableUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${airtableKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          records: [
-            {
-              fields: {
-                'Client ID': clientIdForAirtable,
-                phone_number: phone_number ? String(phone_number).replace(/^whatsapp:/i, '') : phone_number,
-                Occupation: occupation,
-                'Friction Points': friction_points,
-                'Service Commitment': service_commitment,
-                'Enabled Automations': JSON.stringify(enabled_automations || []),
-                Preferences: JSON.stringify(preferences || {}),
+      const user = userRow;
+      const cleanPhoneNumber = user.phone_number ? String(user.phone_number).replace('whatsapp:', '') : '';
+      const airtableFields = {
+        'Client ID': clientIdForAirtable,
+        phone_number: cleanPhoneNumber,
+        Occupation: occupation,
+        'Friction Points': friction_points,
+        'Service Commitment': service_commitment,
+        'Enabled Automations': JSON.stringify(enabled_automations || []),
+        Preferences: JSON.stringify(preferences || {}),
+      };
+
+      if (cleanPhoneNumber) {
+        const formula = `{phone_number}='${cleanPhoneNumber}'`;
+        const searchUrl = `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}?filterByFormula=${encodeURIComponent(formula)}`;
+        const searchRes = await fetch(searchUrl, {
+          headers: { Authorization: `Bearer ${airtableKey}` },
+        });
+
+        if (!searchRes.ok) {
+          const text = await searchRes.text();
+          console.error('[ONBOARDING] Airtable lookup HTTP', searchRes.status, text.slice(0, 500));
+        } else {
+          const searchData = await searchRes.json();
+
+          if (searchData.records && searchData.records.length > 0) {
+            const recordId = searchData.records[0].id;
+            const patchUrl = `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}/${recordId}`;
+            const patchRes = await fetch(patchUrl, {
+              method: 'PATCH',
+              headers: {
+                Authorization: `Bearer ${airtableKey}`,
+                'Content-Type': 'application/json',
               },
-            },
-          ],
-        }),
-      });
-      if (!airtableRes.ok) {
-        const text = await airtableRes.text();
-        console.error('[ONBOARDING] Airtable HTTP', airtableRes.status, text.slice(0, 500));
+              body: JSON.stringify({ fields: airtableFields }),
+            });
+            if (!patchRes.ok) {
+              const text = await patchRes.text();
+              console.error('[ONBOARDING] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
+            } else {
+              console.log('[ONBOARDING] Airtable record updated successfully.');
+            }
+          } else {
+            const createUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
+            const createRes = await fetch(createUrl, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${airtableKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ records: [{ fields: airtableFields }] }),
+            });
+            if (!createRes.ok) {
+              const text = await createRes.text();
+              console.error('[ONBOARDING] Airtable POST HTTP', createRes.status, text.slice(0, 500));
+            } else {
+              console.log('[ONBOARDING] Airtable record created successfully.');
+            }
+          }
+        }
+      } else {
+        console.warn('[ONBOARDING] Skipping Airtable upsert: missing phone_number');
       }
     } catch (err) {
       console.error('[ONBOARDING] Airtable sync failed:', err?.message || err);
