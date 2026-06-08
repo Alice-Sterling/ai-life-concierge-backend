@@ -277,10 +277,10 @@ Phase 7 (Automation Pitch — post-verification only): Immediately after calenda
 
 Dynamic pitching: Lead with the automation that best resolves the friction_points they chose in Phase 3 — Relationship & Milestone Management → prioritize Gifting and Date Night; Event & Lifestyle Curation → Date Night; Bespoke Sourcing → Gifting; Coordinating Logistics → Travel Logistics. Ask which of the three they want activated now (they may choose one, two, or all three). Mention that while these three are available immediately, you will continue building custom automations and gathering deeper preferences as the partnership evolves. Wait for explicit agreement before advancing.
 
-Phase 8 (Profile Commit): Map their automation choices to slug strings only (date_night, gifting, travel_logistics). Say: 'Profile architected successfully. I am ready for your first request.' Immediately call save_onboarding_profile with the translated string values from Phases 1–4 (do not pass raw menu numbers), plus enabled_automations populated with every automation slug they explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting"]). Omit slugs they declined.
+Phase 8 (Profile Commit): Map their automation choices to slug strings only (date_night, gifting, travel_logistics). Say: 'Profile architected successfully. I am ready for your first request.' Immediately call save_onboarding_profile with the translated string values from Phases 1–4 (do not pass raw menu numbers), plus active_automations populated with every automation slug they explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting"]). Omit slugs they declined.
 
 ### DATE NIGHT INTAKE PROTOCOL
-If date_night is listed in the user's LIVE USER CONTEXT under Enabled Automations, but their Preferences object does not contain a date_night key, you must proactively initiate the Date Night Intake. Seamlessly transition the conversation to ask for their preferred neighborhoods, average budget, favorite cuisines, and any dietary restrictions. Once gathered, immediately use the save_date_night_preferences tool to permanently store this data.
+If date_night is listed in the user's LIVE USER CONTEXT under Active Automations, but their Preferences object does not contain a date_night key, you must proactively initiate the Date Night Intake. Seamlessly transition the conversation to ask for their preferred neighborhoods, average budget, favorite cuisines, and any dietary restrictions. Once gathered, immediately use the save_date_night_preferences tool to permanently store this data.
 
 Constraint: Elite, professional tone. Economical but powerful language. No emojis.
 `;
@@ -341,7 +341,7 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
         description:
           'Partnership structure: fully-managed lifestyle partner, self-hosted/DIY AI tools, or team/office exploration.',
       },
-      enabled_automations: {
+      active_automations: {
         type: 'array',
         items: { type: 'string' },
         description:
@@ -501,22 +501,36 @@ async function persistArchitectureSessionFromPipedreamResponse(userId, rawText) 
   if (data && typeof data === 'object' && data.error) return null;
   const { calendarProvider, activeAutomations } = extractArchitectureSessionFields(data);
   const calStr = calendarProvider != null ? String(calendarProvider) : null;
-  const autoStr =
+  const autoJson =
     activeAutomations == null
-      ? null
-      : typeof activeAutomations === 'string'
-        ? activeAutomations
-        : JSON.stringify(activeAutomations);
+      ? '[]'
+      : Array.isArray(activeAutomations)
+        ? JSON.stringify(activeAutomations)
+        : typeof activeAutomations === 'string'
+          ? (() => {
+              try {
+                const parsed = JSON.parse(activeAutomations);
+                return JSON.stringify(Array.isArray(parsed) ? parsed : [activeAutomations]);
+              } catch {
+                return JSON.stringify(
+                  activeAutomations
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                );
+              }
+            })()
+          : JSON.stringify(activeAutomations);
   try {
     await pool.query(
-      `UPDATE users SET calendar_provider = $1, active_automations = $2, architecture_synced_at = NOW() WHERE id = $3::uuid`,
-      [calStr, autoStr, id]
+      `UPDATE users SET calendar_provider = $1, active_automations = $2::jsonb, architecture_synced_at = NOW() WHERE id = $3::uuid`,
+      [calStr, autoJson, id]
     );
   } catch (err) {
     console.error('[SYNC] persist architecture session failed:', err?.message || err);
     return null;
   }
-  return { calendarProvider: calStr, activeAutomations: autoStr };
+  return { calendarProvider: calStr, activeAutomations: autoJson };
 }
 
 const PIPEDREAM_CALENDAR_ACTIONS = ['read_calendar', 'create_event', 'find_slot'];
@@ -622,8 +636,8 @@ async function saveOnboardingProfile(userId, toolInput) {
   const occupation = String(toolInput?.occupation ?? '').trim();
   const friction_points = String(toolInput?.friction_points ?? '').trim();
   const service_commitment = String(toolInput?.service_commitment ?? '').trim();
-  const enabled_automations = Array.isArray(toolInput?.enabled_automations)
-    ? toolInput.enabled_automations.map((item) => String(item).trim()).filter(Boolean)
+  const active_automations = Array.isArray(toolInput?.active_automations)
+    ? toolInput.active_automations.map((item) => String(item).trim()).filter(Boolean)
     : [];
   const preferences =
     toolInput?.preferences != null &&
@@ -638,7 +652,7 @@ async function saveOnboardingProfile(userId, toolInput) {
          last_name = $2,
          email = $3,
          onboarding_status = 'complete',
-         enabled_automations = $5::jsonb,
+         active_automations = $5::jsonb,
          preferences = $6::jsonb
      WHERE id = $4`,
     [
@@ -646,7 +660,7 @@ async function saveOnboardingProfile(userId, toolInput) {
       last_name,
       email,
       userId,
-      JSON.stringify(enabled_automations),
+      JSON.stringify(active_automations),
       JSON.stringify(preferences),
     ]
   );
@@ -695,7 +709,7 @@ async function saveOnboardingProfile(userId, toolInput) {
         Occupation: occupation,
         'Friction Points': friction_points,
         'Service Commitment': service_commitment,
-        'Enabled Automations': JSON.stringify(enabled_automations || []),
+        ActiveAutomations: JSON.stringify(active_automations || []),
         Preferences: JSON.stringify(preferences || {}),
       };
 
@@ -1169,7 +1183,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status, enabled_automations, preferences FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, active_automations, preferences FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -1181,7 +1195,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, active_automations, architecture_synced_at, onboarding_status, enabled_automations, preferences`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, active_automations, preferences`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -1445,10 +1459,6 @@ async function runAgenticConcierge(user, userMessage) {
     user.calendar_provider != null && String(user.calendar_provider).trim() !== ''
       ? String(user.calendar_provider).trim()
       : 'N/A';
-  const autoAm =
-    user.active_automations != null && String(user.active_automations).trim() !== ''
-      ? String(user.active_automations).trim()
-      : 'N/A';
   const archAt =
     user.architecture_synced_at != null
       ? new Date(user.architecture_synced_at).toISOString()
@@ -1457,7 +1467,7 @@ async function runAgenticConcierge(user, userMessage) {
     user.onboarding_status != null && String(user.onboarding_status).trim() !== ''
       ? String(user.onboarding_status).trim()
       : 'pending';
-  const enabledAutomationsList = parseUserJsonbArray(user.enabled_automations);
+  const activeAutomationsList = parseUserJsonbArray(user.active_automations);
   const userPreferences = parseUserJsonbObject(user.preferences);
 
   const dynamicContext = `
@@ -1470,7 +1480,7 @@ async function runAgenticConcierge(user, userMessage) {
 - Email: ${user.email != null && String(user.email).trim() !== '' ? user.email : 'N/A'}
 - First Name: ${user.first_name != null && String(user.first_name).trim() !== '' ? user.first_name : 'N/A'}
 - Onboarding Status: ${onboardingStatus}
-- Enabled Automations: ${enabledAutomationsList.length ? enabledAutomationsList.join(', ') : 'None'}
+- Active Automations: ${activeAutomationsList.length ? activeAutomationsList.join(', ') : 'None'}
 - Preferences: ${JSON.stringify(userPreferences)}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
@@ -1483,7 +1493,6 @@ async function runAgenticConcierge(user, userMessage) {
 - google_super_connected: ${googleSuperActive}
 - calendar_onboarding_link: ${calendarOnboardingLink}
 - calendar_provider: ${calProv}
-- active_automations: ${autoAm}
 - architecture_synced_at: ${archAt}
 `;
   const lockedOverrideBlock = !googleSuperActive

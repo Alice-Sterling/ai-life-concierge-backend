@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
   trial_start_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   subscription_status TEXT NOT NULL DEFAULT 'LITE',
   onboarding_status VARCHAR(32) NOT NULL DEFAULT 'pending',
-  enabled_automations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  active_automations JSONB NOT NULL DEFAULT '[]'::jsonb,
   preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -74,12 +74,45 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS short_id VARCHAR(32) UNIQUE;
 CREATE INDEX IF NOT EXISTS idx_users_short_id ON users(short_id);
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS total_fee NUMERIC(14, 2);
-ALTER TABLE users ADD COLUMN IF NOT EXISTS active_automations TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS lifestyle_architect BOOLEAN;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_status VARCHAR(32) NOT NULL DEFAULT 'pending';
-ALTER TABLE users ADD COLUMN IF NOT EXISTS enabled_automations JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Migrate enabled_automations → active_automations (JSONB); drop legacy TEXT active_automations if present
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'enabled_automations'
+  ) THEN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'active_automations'
+    ) THEN
+      ALTER TABLE users DROP COLUMN active_automations;
+    END IF;
+    ALTER TABLE users RENAME COLUMN enabled_automations TO active_automations;
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns c
+    WHERE c.table_schema = 'public' AND c.table_name = 'users' AND c.column_name = 'active_automations'
+      AND c.data_type = 'text'
+  ) THEN
+    ALTER TABLE users ALTER COLUMN active_automations TYPE JSONB USING (
+      CASE
+        WHEN active_automations IS NULL OR btrim(active_automations) = '' THEN '[]'::jsonb
+        WHEN btrim(active_automations) LIKE '[%' THEN active_automations::jsonb
+        ELSE to_jsonb(regexp_split_to_array(active_automations, '\s*,\s*'))
+      END
+    );
+    ALTER TABLE users ALTER COLUMN active_automations SET DEFAULT '[]'::jsonb;
+    ALTER TABLE users ALTER COLUMN active_automations SET NOT NULL;
+  ELSIF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'active_automations'
+  ) THEN
+    ALTER TABLE users ADD COLUMN active_automations JSONB NOT NULL DEFAULT '[]'::jsonb;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);
