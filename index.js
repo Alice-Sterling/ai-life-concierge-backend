@@ -178,6 +178,12 @@ function getSubscriptionStatusFromUser(user) {
   return 'LITE';
 }
 
+/** Strip Twilio WhatsApp prefix for Airtable / display (e.g. whatsapp:+447... → +447...). */
+function cleanTwilioSenderPhone(raw) {
+  if (raw == null || raw === '') return '';
+  return String(raw).replace(/^whatsapp:/i, '').trim();
+}
+
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
 Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven. You are **Alice** (the Sovereign Architect) — this Master System Prompt overrides conflicting defaults.
@@ -629,7 +635,7 @@ function buildConnectionStatusReport(connections) {
   return { active_integrations, locked_integrations };
 }
 
-async function saveOnboardingProfile(userId, toolInput) {
+async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null) {
   const first_name = String(toolInput?.first_name ?? '').trim();
   const last_name = String(toolInput?.last_name ?? '').trim();
   const email = String(toolInput?.email ?? '').trim();
@@ -671,6 +677,18 @@ async function saveOnboardingProfile(userId, toolInput) {
   );
   const userRow = rows[0] || {};
   const clientIdForAirtable = userRow.short_id || userRow.client_id || null;
+  const cleanPhoneNumber =
+    cleanTwilioSenderPhone(senderPhoneNumber) || cleanTwilioSenderPhone(userRow.phone_number);
+
+  if (cleanPhoneNumber) {
+    await pool.query(
+      `UPDATE users SET phone_number = $1 WHERE id = $2 AND (phone_number IS NULL OR phone_number = '')`,
+      [senderPhoneNumber != null && String(senderPhoneNumber).includes('whatsapp:')
+        ? String(senderPhoneNumber).trim()
+        : `whatsapp:${cleanPhoneNumber}`,
+        userId]
+    );
+  }
 
   const sendGridKey = process.env.SENDGRID_API_KEY;
   if (sendGridKey && email) {
@@ -701,8 +719,6 @@ async function saveOnboardingProfile(userId, toolInput) {
     process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
   if (airtableKey && airtableBaseId && airtableTableName) {
     try {
-      const user = userRow;
-      const cleanPhoneNumber = user.phone_number ? String(user.phone_number).replace('whatsapp:', '') : '';
       const airtableFields = {
         'Client ID': clientIdForAirtable,
         phone_number: cleanPhoneNumber,
@@ -1233,7 +1249,8 @@ async function getHybridResponseFromMessages(
   userMessage,
   toolbox,
   composioUserId,
-  baseSystemPrompt = null
+  baseSystemPrompt = null,
+  options = {}
 ) {
   const composioSupplement =
     toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
@@ -1271,7 +1288,7 @@ async function getHybridResponseFromMessages(
           } else if (tu.name === 'execute_action') {
             payload = await executeComposioAction(tu.input, composioUserId);
           } else if (tu.name === 'save_onboarding_profile') {
-            payload = await saveOnboardingProfile(composioUserId, tu.input);
+            payload = await saveOnboardingProfile(composioUserId, tu.input, options.senderPhoneNumber);
           } else if (tu.name === 'save_date_night_preferences') {
             payload = await saveDateNightPreferences(composioUserId, tu.input);
           } else {
@@ -1426,7 +1443,7 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
   return { vault, web, vaultLowConfidence: vaultResult.lowConfidence, vaultBestRank: vaultResult.bestRank };
 }
 
-async function runAgenticConcierge(user, userMessage) {
+async function runAgenticConcierge(user, userMessage, options = {}) {
   const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
   const subscriptionStatus = getSubscriptionStatusFromUser(user);
   const toolbox = await getAgentTools(user.id, { subscriptionStatus });
@@ -1539,7 +1556,7 @@ async function runAgenticConcierge(user, userMessage) {
 
   console.log('[DEBUG] Final System Prompt being sent to Claude: ', finalSystemPrompt.substring(0, 100));
 
-  return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt);
+  return await getHybridResponseFromMessages(messages, msgText, toolbox, user.id, finalSystemPrompt, options);
 }
 
 async function getClaudeResponse(userTier, userMessage) {
@@ -1710,7 +1727,7 @@ app.post('/webhook', async (req, res) => {
     console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
     console.log('Status: Running Agentic Concierge...');
     console.log('[CRITICAL] Waiting for AI response...');
-    const aiText = await runAgenticConcierge(user, incomingText);
+    const aiText = await runAgenticConcierge(user, incomingText, { senderPhoneNumber: phoneNumber });
     console.log('[CRITICAL] AI response received: ', aiText);
 
     const replyBody =
