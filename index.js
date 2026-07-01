@@ -350,6 +350,52 @@ async function seedAirtableLeadRecord(user, senderPhoneNumber) {
   });
 }
 
+/** Fetch Airtable row fields by Client ID (onboarding registry). */
+async function fetchAirtableRecordFieldsByClientId(clientId) {
+  const cid = String(clientId ?? '').trim();
+  if (!cid) return null;
+
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
+  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
+  if (!apiKey || !baseId || !tableName) return null;
+
+  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId: cid, cleanPhone: null });
+  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}`;
+
+  if (recordId) {
+    const getRes = await fetch(`${baseUrl}/${recordId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const text = await getRes.text();
+    if (!getRes.ok) {
+      console.error('[AIRTABLE] GET record HTTP', getRes.status, text.slice(0, 500));
+      return null;
+    }
+    try {
+      const data = text ? JSON.parse(text) : {};
+      return data.fields || null;
+    } catch {
+      return null;
+    }
+  }
+
+  const formula = `{Client ID}='${escapeAirtableFormulaString(cid)}'`;
+  const searchUrl = `${baseUrl}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const searchText = await searchRes.text();
+  if (!searchRes.ok) {
+    console.error('[AIRTABLE] search HTTP', searchRes.status, searchText.slice(0, 500));
+    return null;
+  }
+  try {
+    const searchData = searchText ? JSON.parse(searchText) : {};
+    return searchData.records?.[0]?.fields || null;
+  } catch {
+    return null;
+  }
+}
+
 function isOnboardingPending(user) {
   const status =
     user?.onboarding_status != null && String(user.onboarding_status).trim() !== ''
@@ -588,7 +634,7 @@ const EXECUTE_ACTION_ANTHROPIC_TOOL = {
 const FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL = {
   name: 'fetch_architecture_profile',
   description:
-    'Retrieves validated onboarding data from the Pipedream/Airtable registry, including CalendarProvider and ActiveAutomations. Required when the user says the exact systems-sync handshake (see system prompt) or when those fields are not yet in LIVE USER CONTEXT. Pass client_id from LIVE USER CONTEXT.',
+    'Retrieves validated onboarding data from the Airtable registry (or Pipedream fallback when configured), including CalendarProvider and ActiveAutomations. Required when the user sends the exact systems-sync handshake (see system prompt) or when those fields are not yet in LIVE USER CONTEXT. Pass client_id from LIVE USER CONTEXT.',
   input_schema: {
     type: 'object',
     properties: {
@@ -599,8 +645,12 @@ const FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL = {
 };
 
 function getArchitectureProfileAnthropicTools() {
-  const url = process.env.FETCH_ARCHITECTURE_PROFILE_URL;
-  if (!url || !String(url).trim()) return [];
+  const hasAirtable =
+    process.env.AIRTABLE_API_KEY &&
+    getAirtableEnvPick('AIRTABLE_BASE_ID', '') &&
+    getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
+  const hasPipedream = process.env.FETCH_ARCHITECTURE_PROFILE_URL;
+  if (!hasAirtable && !hasPipedream) return [];
   return [FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL];
 }
 
@@ -646,6 +696,48 @@ async function fetchArchitectureProfileFromPipedream(clientId) {
   } catch (err) {
     return JSON.stringify({ error: err.message || String(err) });
   }
+}
+
+/**
+ * Architecture profile for systems handshake — Airtable first (no Pipedream required), Pipedream optional fallback.
+ */
+async function fetchArchitectureProfile(clientId) {
+  const cid = String(clientId ?? '').trim();
+  if (!cid) {
+    return JSON.stringify({ error: 'client_id is required' });
+  }
+
+  const airtableFields = await fetchAirtableRecordFieldsByClientId(cid);
+  if (airtableFields) {
+    const payload = {
+      client_id: cid,
+      source: 'airtable',
+      CalendarProvider:
+        airtableFields.CalendarProvider ??
+        airtableFields.calendar_provider ??
+        airtableFields['Calendar Provider'] ??
+        null,
+      ActiveAutomations:
+        airtableFields.ActiveAutomations ??
+        airtableFields.active_automations ??
+        airtableFields['Active Automations'] ??
+        null,
+    };
+    console.log('[SYNC] Architecture profile loaded from Airtable for', cid);
+    return JSON.stringify(payload);
+  }
+
+  const pipedreamUrl = process.env.FETCH_ARCHITECTURE_PROFILE_URL;
+  if (pipedreamUrl && String(pipedreamUrl).trim()) {
+    console.log('[SYNC] Airtable miss; trying Pipedream for', cid);
+    return fetchArchitectureProfileFromPipedream(cid);
+  }
+
+  return JSON.stringify({
+    error: 'Architecture profile not found in Airtable',
+    client_id: cid,
+    hint: 'Complete web onboarding or finish WhatsApp onboarding to populate the registry.',
+  });
 }
 
 /**
@@ -1063,7 +1155,7 @@ async function getAgentTools(userId, options = {}) {
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
   ];
 
-  if (!composio) {
+  if (!composio || options.skipComposio) {
     return {
       connections: [],
       availableTools: [],
@@ -1112,7 +1204,9 @@ async function getAgentTools(userId, options = {}) {
       toolboxSummary,
     };
   } catch (err) {
-    console.error('getAgentTools error:', err.message);
+    if (!options.skipComposio) {
+      console.error('getAgentTools error:', err.message);
+    }
     return {
       connections: [],
       availableTools: [],
@@ -1408,7 +1502,7 @@ async function getHybridResponseFromMessages(
         for (const tu of toolUses) {
           let payload;
           if (tu.name === 'fetch_architecture_profile') {
-            payload = await fetchArchitectureProfileFromPipedream(tu.input?.client_id);
+            payload = await fetchArchitectureProfile(tu.input?.client_id);
           } else if (tu.name === 'execute_pipedream_calendar_task') {
             payload = await executePipedreamCalendarTask(tu.input);
           } else if (tu.name === 'execute_action') {
@@ -1571,7 +1665,11 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
 async function runAgenticConcierge(user, userMessage, options = {}) {
   const msgText = String(normalizeSearchQueryText(userMessage) ?? '').trim();
   const subscriptionStatus = getSubscriptionStatusFromUser(user);
-  const toolbox = await getAgentTools(user.id, { subscriptionStatus });
+  const onboardingPending = isOnboardingPending(user);
+  const toolbox = await getAgentTools(user.id, {
+    subscriptionStatus,
+    skipComposio: onboardingPending,
+  });
   const composioGoogleSuper = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
   const googleSuperActive = composioGoogleSuper || Boolean(user?.google_super_connected);
 
@@ -1645,7 +1743,9 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
     : '';
   const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
 
-  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText);
+  const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
+    skipTavily: onboardingPending,
+  });
 
   const vaultBlock = vault.length
     ? vault
@@ -1804,19 +1904,25 @@ app.post('/webhook', async (req, res) => {
 
     // Systems-sync phrase: pull architecture profile into Postgres + LIVE USER CONTEXT, then continue to agent
     if (incomingText === SYSTEMS_SYNC_HANDSHAKE_PHRASE) {
-      // short_id is the universal onboarding identifier (matches the onboarding link + Airtable/Pipedream registry key)
       const onboardingId = user.short_id || user.client_id;
-      if (onboardingId && process.env.FETCH_ARCHITECTURE_PROFILE_URL) {
-        const raw = await fetchArchitectureProfileFromPipedream(onboardingId);
+      if (onboardingId) {
+        const raw = await fetchArchitectureProfile(onboardingId);
         const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw);
         if (persisted) {
           user.calendar_provider = persisted.calendarProvider;
           user.active_automations = persisted.activeAutomations;
           user.architecture_synced_at = new Date();
+        } else {
+          await pool.query('UPDATE users SET architecture_synced_at = NOW() WHERE id = $1', [user.id]);
+          user.architecture_synced_at = new Date();
         }
-        console.log('[SYNC] Systems-sync handshake; architecture profile pull attempted for user:', user.id);
+        await pool.query('UPDATE users SET google_super_connected = true WHERE id = $1', [user.id]);
+        user.google_super_connected = true;
+        console.log('[SYNC] Systems-sync handshake processed for user:', user.id, {
+          registryFields: Boolean(persisted),
+        });
       } else {
-        console.warn('[SYNC] Systems-sync phrase but missing short_id/client_id or FETCH_ARCHITECTURE_PROFILE_URL');
+        console.warn('[SYNC] Systems-sync phrase but missing short_id/client_id');
       }
     }
 
