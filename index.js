@@ -1132,18 +1132,8 @@ async function checkCalendarAvailability(userId, toolInput) {
   const headers = {
     'Content-Type': 'application/json',
     'x-pd-external-user-id': clientId,
+    'x-pd-environment': process.env.PIPEDREAM_CONNECT_ENV || 'production',
   };
-  const token =
-    process.env.PIPEDREAM_CALENDAR_QUERY_TOKEN ||
-    process.env.PIPEDREAM_CALENDAR_TOKEN ||
-    process.env.PIPEDREAM_ARCHITECTURE_PROFILE_TOKEN;
-  if (token != null && String(token).trim() !== '') {
-    headers.Authorization = `Bearer ${String(token).trim()}`;
-  }
-  const pdEnv = process.env.PIPEDREAM_ENVIRONMENT;
-  if (pdEnv != null && String(pdEnv).trim() !== '') {
-    headers['x-pd-environment'] = String(pdEnv).trim();
-  }
 
   const body = {
     client_id: clientId,
