@@ -169,13 +169,63 @@ function normalizeSearchQueryText(input) {
   return s;
 }
 
-/** PRO/LITE from Postgres `subscription_status` only (no `tier` fallback). */
+/** Days since enrollment anchor (trial_start_date or created_at). */
+function getFoundingMemberWindow(user) {
+  const enrollAnchor = user?.trial_start_date ?? user?.created_at;
+  if (!enrollAnchor) return { daysSinceEnrollment: null, inWindow: false };
+  const en = new Date(enrollAnchor);
+  if (Number.isNaN(en.getTime())) return { daysSinceEnrollment: null, inWindow: false };
+  const daysSinceEnrollment = Math.floor((Date.now() - en.getTime()) / (1000 * 60 * 60 * 24));
+  return {
+    daysSinceEnrollment,
+    inWindow: daysSinceEnrollment >= 0 && daysSinceEnrollment <= 180,
+  };
+}
+
+/** PRO, FOUNDING_MEMBER (180-day trial), or LITE. */
 function getSubscriptionStatusFromUser(user) {
   if (user?.subscription_status != null && String(user.subscription_status).trim() !== '') {
     const u = String(user.subscription_status).trim().toUpperCase();
-    return u === 'PRO' ? 'PRO' : 'LITE';
+    if (u === 'PRO') return 'PRO';
+    if (u === 'FOUNDING_MEMBER' || u === 'TRIAL' || u === 'FOUNDING MEMBER') {
+      const { inWindow } = getFoundingMemberWindow(user);
+      return inWindow ? 'FOUNDING_MEMBER' : 'LITE';
+    }
   }
+  const { inWindow } = getFoundingMemberWindow(user);
+  if (inWindow) return 'FOUNDING_MEMBER';
   return 'LITE';
+}
+
+function hasAutonomousExecutionClearance(subscriptionStatus) {
+  return subscriptionStatus === 'PRO' || subscriptionStatus === 'FOUNDING_MEMBER';
+}
+
+function getUserMembershipLabel(user) {
+  const status = getSubscriptionStatusFromUser(user);
+  if (status === 'PRO') return 'pro';
+  if (status === 'FOUNDING_MEMBER') return 'founding_member';
+  return 'lite';
+}
+
+async function reconcileUserMembershipTier(user) {
+  if (!user?.id) return user;
+  const status = getSubscriptionStatusFromUser(user);
+  if (status === 'FOUNDING_MEMBER') {
+    await pool.query(
+      `UPDATE users SET subscription_status = 'FOUNDING_MEMBER'
+       WHERE id = $1 AND UPPER(TRIM(COALESCE(subscription_status, ''))) <> 'PRO'`,
+      [user.id]
+    );
+    user.subscription_status = 'FOUNDING_MEMBER';
+  } else if (status === 'LITE') {
+    const sub = String(user.subscription_status || '').trim().toUpperCase();
+    if (sub === 'FOUNDING_MEMBER' || sub === 'TRIAL') {
+      await pool.query(`UPDATE users SET subscription_status = 'LITE' WHERE id = $1`, [user.id]);
+      user.subscription_status = 'LITE';
+    }
+  }
+  return user;
 }
 
 /** Strip Twilio WhatsApp prefix for Airtable / display (e.g. whatsapp:+447... → +447...). */
@@ -246,6 +296,24 @@ function extractCalendarProviderFromAirtableFields(fields) {
     fields['Calendar Provider'] ??
     null;
   return normalizeCalendarProviderValue(raw);
+}
+
+function parseAirtableDateValue(raw) {
+  if (raw == null || String(raw).trim() === '') return null;
+  const d = raw instanceof Date ? raw : new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function extractTrialStartDateFromAirtableFields(fields) {
+  if (!fields || typeof fields !== 'object') return null;
+  const raw =
+    fields['Trial Start Date'] ??
+    fields.TrialStartDate ??
+    fields.trial_start_date ??
+    fields['Trial start date'] ??
+    null;
+  return parseAirtableDateValue(raw);
 }
 
 async function findAirtableRecordsByClientId(clientId) {
@@ -478,7 +546,7 @@ async function fetchAirtableRecordFieldsByClientId(clientId) {
 }
 
 /**
- * Pull CalendarProvider (+ optional phone) from Airtable by client_id; write calendar_provider to Postgres.
+ * Pull CalendarProvider, trial_start_date (+ optional phone) from Airtable by client_id; write to Postgres.
  */
 async function syncCalendarFromAirtableForUser(userId, clientId) {
   const cid = String(clientId ?? '').trim();
@@ -489,6 +557,7 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
 
   const merged = mergeAirtableFieldsFromDuplicates(records);
   const calendarProvider = extractCalendarProviderFromAirtableFields(merged);
+  const trialStartDate = extractTrialStartDateFromAirtableFields(merged);
   const phoneField = getAirtablePhoneFieldName();
   const mergedPhone = merged[phoneField] ? cleanTwilioSenderPhone(merged[phoneField]) : null;
 
@@ -498,6 +567,14 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
       [calendarProvider, userId]
     );
     console.log('[SYNC] calendar_provider from Airtable:', calendarProvider, 'user:', userId);
+  }
+
+  if (trialStartDate) {
+    await pool.query(`UPDATE users SET trial_start_date = $1 WHERE id = $2::uuid`, [
+      trialStartDate,
+      userId,
+    ]);
+    console.log('[SYNC] trial_start_date from Airtable:', trialStartDate.toISOString(), 'user:', userId);
   }
 
   if (records.length > 1) {
@@ -517,6 +594,7 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
 
   return {
     calendarProvider,
+    trialStartDate,
     mergedPhone,
     duplicateCount: records.length,
     activeAutomations: merged.ActiveAutomations ?? merged.active_automations ?? null,
@@ -892,6 +970,8 @@ async function fetchArchitectureProfile(clientId) {
         airtableFields.calendar_provider ??
         airtableFields['Calendar Provider'] ??
         null,
+      TrialStartDate:
+        extractTrialStartDateFromAirtableFields(airtableFields)?.toISOString() ?? null,
       ActiveAutomations: normalizeAutomationSlugs(
         airtableFields.ActiveAutomations ??
           airtableFields.active_automations ??
@@ -1051,12 +1131,15 @@ function getCalendarAvailabilityAnthropicTools() {
   return [CHECK_CALENDAR_AVAILABILITY_ANTHROPIC_TOOL];
 }
 
-async function refreshCalendarProviderFromAirtableIfMissing(user) {
-  if (isCalendarConnected(user)) return user;
+async function refreshAirtableProfileForUser(user) {
   const clientId = user?.short_id || user?.client_id;
   if (!clientId) return user;
   const sync = await syncCalendarFromAirtableForUser(user.id, clientId);
-  if (sync?.calendarProvider) {
+  if (sync?.trialStartDate) {
+    user.trial_start_date = sync.trialStartDate;
+    console.log('[SYNC] auto-refreshed trial_start_date from Airtable:', sync.trialStartDate.toISOString());
+  }
+  if (!isCalendarConnected(user) && sync?.calendarProvider) {
     user.calendar_provider = sync.calendarProvider;
     user.architecture_synced_at = new Date();
     console.log('[SYNC] auto-refreshed calendar_provider from Airtable:', sync.calendarProvider);
@@ -1132,7 +1215,7 @@ async function checkCalendarAvailability(userId, toolInput) {
   const headers = {
     'Content-Type': 'application/json',
     'x-pd-external-user-id': clientId,
-    'x-pd-environment': process.env.PIPEDREAM_CONNECT_ENV || 'production',
+    'x-pd-environment': process.env.PIPEDREAM_CONNECT_ENV || 'development',
   };
 
   const body = {
@@ -1484,11 +1567,14 @@ async function executeComposioAction(toolInput, composioUserId) {
 /**
  * Fetches active Composio connections for the user and builds a Toolbox (metadata + Anthropic tool defs).
  * @param {string} userId - Postgres user UUID; used as Composio entityId / user_id everywhere.
- * @param {{ subscriptionStatus?: 'PRO'|'LITE' }} [options] - execute_action is only exposed when subscriptionStatus is PRO.
+ * @param {{ subscriptionStatus?: 'PRO'|'FOUNDING_MEMBER'|'LITE' }} [options] - execute_action when PRO or FOUNDING_MEMBER.
  */
 async function getAgentTools(userId, options = {}) {
   const uid = String(userId);
-  const subscriptionStatus = options.subscriptionStatus === 'PRO' ? 'PRO' : 'LITE';
+  const subscriptionStatus =
+    options.subscriptionStatus === 'PRO' || options.subscriptionStatus === 'FOUNDING_MEMBER'
+      ? options.subscriptionStatus
+      : 'LITE';
   const archProfileTools = getArchitectureProfileAnthropicTools();
   const pipedreamCalendarTools = getPipedreamCalendarAnthropicTools();
   const calendarAvailabilityTools = getCalendarAvailabilityAnthropicTools();
@@ -1539,7 +1625,7 @@ async function getAgentTools(userId, options = {}) {
     }
     const toolboxSummary = connections.length > 0 ? formatToolboxSummary(connections, availableTools) : '';
     const anthropicTools = [...staticAnthropicTools];
-    if (connections.length > 0 && subscriptionStatus === 'PRO') {
+    if (connections.length > 0 && hasAutonomousExecutionClearance(subscriptionStatus)) {
       anthropicTools.push(EXECUTE_ACTION_ANTHROPIC_TOOL);
     }
     return {
@@ -1973,17 +2059,16 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
 
-  const enrollAnchor = user.trial_start_date ?? user.created_at;
-  let daysSinceEnrollment = 'N/A';
-  let foundingMember180Window = false;
-  if (enrollAnchor) {
-    const en = new Date(enrollAnchor);
-    if (!Number.isNaN(en.getTime())) {
-      const d = Math.floor((Date.now() - en.getTime()) / (1000 * 60 * 60 * 24));
-      daysSinceEnrollment = String(d);
-      foundingMember180Window = d >= 0 && d <= 180;
-    }
-  }
+  const { daysSinceEnrollment: daysSinceEnrollmentNum, inWindow: foundingMember180Window } =
+    getFoundingMemberWindow(user);
+  const daysSinceEnrollment =
+    daysSinceEnrollmentNum != null ? String(daysSinceEnrollmentNum) : 'N/A';
+  const membershipStatus =
+    subscriptionStatus === 'PRO'
+      ? 'pro'
+      : subscriptionStatus === 'FOUNDING_MEMBER'
+        ? 'founding_member'
+        : 'lite';
 
   const calendarOnboardingLink = await generateOnboardingLink(user.id);
 
@@ -2041,8 +2126,11 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
 - days_since_enrollment: ${daysSinceEnrollment}
 - founding_member_180_window: ${foundingMember180Window}
+- membership_status: ${membershipStatus}
+- execution_tier: ${membershipStatus}
+- postgres_tier: ${user.tier || 'lite'}
 - subscription_status: ${subscriptionStatus}
-- autonomous_execution_enabled: ${subscriptionStatus === 'PRO' || foundingMember180Window}
+- autonomous_execution_enabled: ${hasAutonomousExecutionClearance(subscriptionStatus)}
 - connection_status: ${JSON.stringify(connectionReport)}
 - calendar_onboarding_link: ${calendarOnboardingLink}
 - architecture_synced_at: ${archAt}
@@ -2225,7 +2313,7 @@ app.post('/webhook', async (req, res) => {
     if (!user.phone_number && phoneNumber) {
       user.phone_number = phoneNumber;
     }
-    console.log('Status: User identified as:', user.tier);
+    console.log('Status: User identified as:', getUserMembershipLabel(user));
 
     // Anchor Client ID + phone in Airtable on every message (idempotent)
     const airtableLeadOk = await seedAirtableLeadRecord(user, phoneNumber);
@@ -2233,9 +2321,10 @@ app.post('/webhook', async (req, res) => {
       console.warn('[AIRTABLE_LEAD] sync skipped or failed');
     }
 
-    await refreshCalendarProviderFromAirtableIfMissing(user);
-    const refreshedCal = await getUserByPhone(phoneNumber);
-    if (refreshedCal) user = refreshedCal;
+    await refreshAirtableProfileForUser(user);
+    await reconcileUserMembershipTier(user);
+    const refreshedProfile = await getUserByPhone(phoneNumber);
+    if (refreshedProfile) user = refreshedProfile;
 
     const incomingText = String(req.body.Body || '').trim();
 
