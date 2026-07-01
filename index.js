@@ -264,7 +264,6 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
   const cfg = getAirtableConfig();
   if (!cfg) return false;
 
-  const phoneField = getAirtablePhoneFieldName();
   const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
   const recordId = await findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone });
 
@@ -282,6 +281,11 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
       console.error(`[${logTag}] PATCH failed:`, patchRes.status, patchText.slice(0, 400));
       return false;
     }
+    if (logTag === 'AIRTABLE_LEAD') {
+      console.log(
+        `[AIRTABLE_LEAD] synced record ${recordId} | Client ID: ${clientId || '(none)'} | phone: ${cleanPhone || '(none)'} | table: ${cfg.tableRef}`
+      );
+    }
     return true;
   }
 
@@ -297,6 +301,18 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
   if (!createRes.ok) {
     console.error(`[${logTag}] POST failed:`, createRes.status, createText.slice(0, 400));
     return false;
+  }
+  if (logTag === 'AIRTABLE_LEAD') {
+    let newId = '(unknown)';
+    try {
+      const created = createText ? JSON.parse(createText) : {};
+      newId = created.records?.[0]?.id || newId;
+    } catch {
+      /* ignore */
+    }
+    console.log(
+      `[AIRTABLE_LEAD] created record ${newId} | Client ID: ${clientId || '(none)'} | phone: ${cleanPhone || '(none)'} | table: ${cfg.tableRef}`
+    );
   }
   return true;
 }
