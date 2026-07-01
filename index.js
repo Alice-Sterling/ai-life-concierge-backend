@@ -223,49 +223,164 @@ function resolveCleanPhoneForAirtable(dbPhone, senderPhone) {
   return fromDb || fromSender;
 }
 
-async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
+/** Normalize Postgres/Airtable calendar provider → google | outlook | null */
+function normalizeCalendarProviderValue(raw) {
+  if (raw == null || String(raw).trim() === '') return null;
+  const s = String(raw).trim().toLowerCase();
+  if (s.includes('outlook') || s.includes('microsoft') || s === 'ms') return 'outlook';
+  if (s.includes('google') || s === 'gcal') return 'google';
+  if (s === 'outlook' || s === 'google') return s;
+  return null;
+}
+
+function isCalendarConnected(user) {
+  const norm = normalizeCalendarProviderValue(user?.calendar_provider);
+  return norm === 'google' || norm === 'outlook';
+}
+
+function extractCalendarProviderFromAirtableFields(fields) {
+  if (!fields || typeof fields !== 'object') return null;
+  const raw =
+    fields.CalendarProvider ??
+    fields.calendar_provider ??
+    fields['Calendar Provider'] ??
+    null;
+  return normalizeCalendarProviderValue(raw);
+}
+
+async function findAirtableRecordsByClientId(clientId) {
+  const cid = String(clientId ?? '').trim();
+  if (!cid) return [];
+
+  const cfg = getAirtableConfig();
+  if (!cfg) return [];
+
+  const formula = `{Client ID}='${escapeAirtableFormulaString(cid)}'`;
+  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
+  const searchUrl = `${baseUrl}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=100`;
+  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+  const text = await searchRes.text();
+  if (!searchRes.ok) {
+    console.error('[AIRTABLE] client_id search failed:', searchRes.status, text.slice(0, 300));
+    return [];
+  }
+  try {
+    const data = text ? JSON.parse(text) : {};
+    return (data.records || []).map((r) => ({ id: r.id, fields: r.fields || {} }));
+  } catch {
+    return [];
+  }
+}
+
+function mergeAirtableFieldsFromDuplicates(records) {
+  const merged = {};
+  for (const rec of records) {
+    const f = rec.fields || {};
+    for (const [key, val] of Object.entries(f)) {
+      if (val == null || String(val).trim() === '') continue;
+      if (merged[key] == null || String(merged[key]).trim() === '') {
+        merged[key] = val;
+      }
+    }
+  }
+  return merged;
+}
+
+function pickCanonicalAirtableRecord(records) {
+  if (!records?.length) return null;
+  if (records.length === 1) return records[0];
+
+  const phoneField = getAirtablePhoneFieldName();
+  let best = records[0];
+  let bestScore = -1;
+  for (const rec of records) {
+    const f = rec.fields || {};
+    let score = 0;
+    if (f['Client ID']) score += 10;
+    if (f[phoneField]) score += 25;
+    if (f.CalendarProvider || f.calendar_provider || f['Calendar Provider']) score += 25;
+    score += Object.keys(f).length;
+    if (score > bestScore) {
+      best = rec;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+async function findAirtableRecordIdByPhone(cleanPhone) {
+  if (!cleanPhone) return null;
   const cfg = getAirtableConfig();
   if (!cfg) return null;
 
   const phoneField = getAirtablePhoneFieldName();
-  const formulas = [];
-  if (clientId) {
-    formulas.push(`{Client ID}='${escapeAirtableFormulaString(clientId)}'`);
+  const formula = `{${phoneField}}='${escapeAirtableFormulaString(cleanPhone)}'`;
+  const searchUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+  const text = await searchRes.text();
+  if (!searchRes.ok) return null;
+  try {
+    const data = text ? JSON.parse(text) : {};
+    return data.records?.[0]?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
+  const cid = String(clientId ?? '').trim();
+  if (cid) {
+    const records = await findAirtableRecordsByClientId(cid);
+    if (records.length > 0) {
+      return pickCanonicalAirtableRecord(records).id;
+    }
   }
   if (cleanPhone) {
-    formulas.push(`{${phoneField}}='${escapeAirtableFormulaString(cleanPhone)}'`);
-  }
-
-  for (const formula of formulas) {
-    const searchUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
-    const searchRes = await fetch(searchUrl, {
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
-    });
-    const text = await searchRes.text();
-    let searchData;
-    try {
-      searchData = text ? JSON.parse(text) : {};
-    } catch {
-      console.error('[AIRTABLE] lookup parse error:', text.slice(0, 200));
-      continue;
-    }
-    if (!searchRes.ok) {
-      console.error('[AIRTABLE] lookup failed:', searchRes.status, text.slice(0, 300));
-      continue;
-    }
-    if (searchData.records?.length > 0) {
-      return searchData.records[0].id;
-    }
+    return findAirtableRecordIdByPhone(cleanPhone);
   }
   return null;
+}
+
+/** Strip empty values that would wipe existing Airtable columns on PATCH. */
+function sanitizeAirtablePatchFields(fields, existingFields = {}) {
+  const out = {};
+  for (const [key, val] of Object.entries(fields)) {
+    if (val == null) continue;
+    if (typeof val === 'string' && val.trim() === '' && existingFields[key]) continue;
+    out[key] = val;
+  }
+  return out;
 }
 
 async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AIRTABLE' }) {
   const cfg = getAirtableConfig();
   if (!cfg) return false;
 
+  const cid = String(clientId ?? '').trim();
   const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
-  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone });
+  const phoneField = getAirtablePhoneFieldName();
+
+  let duplicates = cid ? await findAirtableRecordsByClientId(cid) : [];
+  let recordId = null;
+  let existingMerged = {};
+
+  if (duplicates.length > 0) {
+    const canonical = pickCanonicalAirtableRecord(duplicates);
+    recordId = canonical.id;
+    existingMerged = mergeAirtableFieldsFromDuplicates(duplicates);
+    if (duplicates.length > 1) {
+      console.warn(
+        `[${logTag}] ${duplicates.length} Airtable rows share Client ID ${cid}; merging into ${recordId}`
+      );
+    }
+  } else if (cleanPhone) {
+    recordId = await findAirtableRecordIdByPhone(cleanPhone);
+  }
+
+  const patchFields = sanitizeAirtablePatchFields({ ...fields }, existingMerged);
+  if (cid) patchFields['Client ID'] = cid;
+  if (cleanPhone) patchFields[phoneField] = cleanPhone;
+  else if (existingMerged[phoneField]) patchFields[phoneField] = existingMerged[phoneField];
 
   if (recordId) {
     const patchRes = await fetch(`${baseUrl}/${recordId}`, {
@@ -274,7 +389,7 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
         Authorization: `Bearer ${cfg.apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ fields, typecast: true }),
+      body: JSON.stringify({ fields: patchFields, typecast: true }),
     });
     const patchText = await patchRes.text();
     if (!patchRes.ok) {
@@ -283,10 +398,23 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
     }
     if (logTag === 'AIRTABLE_LEAD') {
       console.log(
-        `[AIRTABLE_LEAD] synced record ${recordId} | Client ID: ${clientId || '(none)'} | phone: ${cleanPhone || '(none)'} | table: ${cfg.tableRef}`
+        `[AIRTABLE_LEAD] synced record ${recordId} | Client ID: ${cid || '(none)'} | phone: ${cleanPhone || existingMerged[phoneField] || '(none)'}`
       );
     }
     return true;
+  }
+
+  if (cid) {
+    duplicates = await findAirtableRecordsByClientId(cid);
+    if (duplicates.length > 0) {
+      console.error(`[${logTag}] refused create: Client ID ${cid} already exists (${duplicates.length} row(s))`);
+      return upsertAirtableRecord(fields, { clientId: cid, cleanPhone, logTag });
+    }
+  }
+
+  if (!cid && !cleanPhone) {
+    console.warn(`[${logTag}] skipped: no client_id or phone to anchor record`);
+    return false;
   }
 
   const createRes = await fetch(baseUrl, {
@@ -295,7 +423,7 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
       Authorization: `Bearer ${cfg.apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ records: [{ fields }], typecast: true }),
+    body: JSON.stringify({ records: [{ fields: patchFields }], typecast: true }),
   });
   const createText = await createRes.text();
   if (!createRes.ok) {
@@ -310,9 +438,7 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
     } catch {
       /* ignore */
     }
-    console.log(
-      `[AIRTABLE_LEAD] created record ${newId} | Client ID: ${clientId || '(none)'} | phone: ${cleanPhone || '(none)'} | table: ${cfg.tableRef}`
-    );
+    console.log(`[AIRTABLE_LEAD] created record ${newId} | Client ID: ${cid || '(none)'}`);
   }
   return true;
 }
@@ -339,48 +465,62 @@ async function seedAirtableLeadRecord(user, senderPhoneNumber) {
   });
 }
 
-/** Fetch Airtable row fields by Client ID (onboarding registry). */
+/** Fetch merged Airtable row fields by Client ID (deduplicates split rows in memory). */
 async function fetchAirtableRecordFieldsByClientId(clientId) {
   const cid = String(clientId ?? '').trim();
   if (!cid) return null;
 
-  const cfg = getAirtableConfig();
-  if (!cfg) return null;
+  const records = await findAirtableRecordsByClientId(cid);
+  if (records.length > 0) {
+    return mergeAirtableFieldsFromDuplicates(records);
+  }
+  return null;
+}
 
-  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId: cid, cleanPhone: null });
-  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
+/**
+ * Pull CalendarProvider (+ optional phone) from Airtable by client_id; write calendar_provider to Postgres.
+ */
+async function syncCalendarFromAirtableForUser(userId, clientId) {
+  const cid = String(clientId ?? '').trim();
+  if (!cid) return null;
 
-  if (recordId) {
-    const getRes = await fetch(`${baseUrl}/${recordId}`, {
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+  const records = await findAirtableRecordsByClientId(cid);
+  if (!records.length) return null;
+
+  const merged = mergeAirtableFieldsFromDuplicates(records);
+  const calendarProvider = extractCalendarProviderFromAirtableFields(merged);
+  const phoneField = getAirtablePhoneFieldName();
+  const mergedPhone = merged[phoneField] ? cleanTwilioSenderPhone(merged[phoneField]) : null;
+
+  if (calendarProvider) {
+    await pool.query(
+      `UPDATE users SET calendar_provider = $1, architecture_synced_at = NOW() WHERE id = $2::uuid`,
+      [calendarProvider, userId]
+    );
+    console.log('[SYNC] calendar_provider from Airtable:', calendarProvider, 'user:', userId);
+  }
+
+  if (records.length > 1) {
+    const canonical = pickCanonicalAirtableRecord(records);
+    const phoneFieldName = getAirtablePhoneFieldName();
+    const repairFields = { 'Client ID': cid };
+    if (merged[phoneFieldName]) repairFields[phoneFieldName] = merged[phoneFieldName];
+    if (merged.CalendarProvider || merged.calendar_provider) {
+      repairFields.CalendarProvider = merged.CalendarProvider || merged.calendar_provider;
+    }
+    await upsertAirtableRecord(repairFields, {
+      clientId: cid,
+      cleanPhone: mergedPhone,
+      logTag: 'AIRTABLE_MERGE',
     });
-    const text = await getRes.text();
-    if (!getRes.ok) {
-      console.error('[AIRTABLE] GET record HTTP', getRes.status, text.slice(0, 500));
-      return null;
-    }
-    try {
-      const data = text ? JSON.parse(text) : {};
-      return data.fields || null;
-    } catch {
-      return null;
-    }
   }
 
-  const formula = `{Client ID}='${escapeAirtableFormulaString(cid)}'`;
-  const searchUrl = `${baseUrl}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
-  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
-  const searchText = await searchRes.text();
-  if (!searchRes.ok) {
-    console.error('[AIRTABLE] search HTTP', searchRes.status, searchText.slice(0, 500));
-    return null;
-  }
-  try {
-    const searchData = searchText ? JSON.parse(searchText) : {};
-    return searchData.records?.[0]?.fields || null;
-  } catch {
-    return null;
-  }
+  return {
+    calendarProvider,
+    mergedPhone,
+    duplicateCount: records.length,
+    activeAutomations: merged.ActiveAutomations ?? merged.active_automations ?? null,
+  };
 }
 
 function isOnboardingPending(user) {
@@ -473,7 +613,7 @@ You have access to the user's LIVE STATE via the context block provided by the s
 - Lite Phase: If the 180-day founding_member_180_window is false and subscription_status is not PRO, downgrade to research-only mode. Inform the user: "Autonomous layer expired. Upgrade to reactivate execution."
 
 2. CALENDAR PROTOCOL & OPPORTUNITY SCANNING
-If LIVE USER CONTEXT shows calendar_connected: true, you are a temporal architect. You CANNOT infer availability from text alone.
+If LIVE USER CONTEXT shows Calendar Connected: True, you are a temporal architect. You CANNOT infer availability from text alone.
 - Mandatory Tool: Before proposing ANY specific date, time, reservation window, or itinerary slot, you MUST call check_calendar_availability with ISO 8601 start_time and end_time covering the proposed window, plus intent (e.g. "date night proposal").
 - Wait for the tool result. Only propose times that fall within returned free/busy gaps. Never propose slots that overlap busy periods.
 - Contextual Awareness: If the user says "next weekend", calculate exact dates from Current System Time, then call check_calendar_availability for that range before suggesting options.
@@ -507,8 +647,8 @@ Phase 1 (Identity): Welcome. Ask for first and last name and preferred email.
 Phase 2 (Profile): Ask which profile fits (1–4): Founder/CEO, Executive/Professional, Investor/Family Office, Creative/Artist.
 Phase 3 (Friction): Map reply. Ask where to deploy value (1–4): Relationship & Milestone Management, Event & Lifestyle Curation, Bespoke Sourcing, Coordinating Logistics. If user picks multiple, store the primary in friction_points and note secondary in conversation.
 Phase 4 (Commitment): Map reply. Ask partnership structure (1–3): fully-managed lifestyle partner, self-hosted/DIY AI tools, team/office exploration.
-Phase 5 (Calendar): Do not pitch automations until calendar is connected. Send Vault link. Stay here until google_super_connected is true OR calendar_provider is set in LIVE USER CONTEXT.
-Phase 6 (Verification): Backend sync is complete when calendar_provider appears in LIVE USER CONTEXT. Read calendar_provider and Active Automations from context — do not call fetch_architecture_profile unless data is missing.
+Phase 5 (Calendar): Do not pitch automations until calendar is connected. Send Vault link. Stay here while Calendar Connected is False in LIVE USER CONTEXT.
+Phase 6 (Verification): Backend sync is complete when Calendar Provider is Google or Outlook in LIVE USER CONTEXT. Read Active Automations from context — do not call fetch_architecture_profile unless data is missing.
 Phase 7 (Automations): Pitch flagship automations (canonical slugs only):
 • date_night — bi-weekly recommendations, calendar conflict checking, booking staging
 • gifting — milestone and key-date curation
@@ -783,7 +923,10 @@ function extractArchitectureSessionFields(data) {
     data.CalendarProvider ?? data.calendarProvider ?? data.calendar_provider ?? null;
   const auto =
     data.ActiveAutomations ?? data.activeAutomations ?? data.active_automations ?? null;
-  return { calendarProvider: cal, activeAutomations: auto };
+  return {
+    calendarProvider: normalizeCalendarProviderValue(cal),
+    activeAutomations: auto,
+  };
 }
 
 /**
@@ -803,7 +946,7 @@ async function persistArchitectureSessionFromPipedreamResponse(userId, rawText, 
   }
   if (data && typeof data === 'object' && data.error) return null;
   const { calendarProvider, activeAutomations } = extractArchitectureSessionFields(data);
-  const calStr = calendarProvider != null ? String(calendarProvider) : null;
+  const calStr = calendarProvider;
   const normalizedAutos = normalizeAutomationSlugs(activeAutomations);
   const autoJson = JSON.stringify(normalizedAutos);
 
@@ -1226,7 +1369,10 @@ async function saveDateNightPreferences(userId, toolInput) {
     ? toolInput.dietary_restrictions.map((item) => String(item).trim()).filter(Boolean)
     : [];
 
-  const { rows } = await pool.query('SELECT preferences, phone_number FROM users WHERE id = $1', [userId]);
+  const { rows } = await pool.query(
+    'SELECT preferences, phone_number, short_id, client_id FROM users WHERE id = $1',
+    [userId]
+  );
   const userRow = rows[0] || {};
   const currentPreferences = parseUserJsonbObject(userRow.preferences);
   const updatedPreferences = {
@@ -1240,36 +1386,16 @@ async function saveDateNightPreferences(userId, toolInput) {
     userId,
   ]);
 
-  const user = userRow;
+  const clientIdForAirtable = userRow.short_id || userRow.client_id || null;
+  const cleanPhone = resolveCleanPhoneForAirtable(userRow.phone_number, null);
 
-  if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_NAME && user.phone_number) {
+  if (getAirtableConfig() && clientIdForAirtable) {
     try {
-      const cleanPhoneNumber = resolveCleanPhoneForAirtable(user.phone_number, null);
-      const recordId = await findAirtableRecordIdByClientOrPhone({ clientId: null, cleanPhone: cleanPhoneNumber });
-
-      if (recordId) {
-        const patchUrl = `https://api.airtable.com/v0/${encodeURIComponent(process.env.AIRTABLE_BASE_ID)}/${encodeURIComponent(process.env.AIRTABLE_TABLE_NAME)}/${recordId}`;
-        const patchRes = await fetch(patchUrl, {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            fields: {
-              Preferences: JSON.stringify(updatedPreferences),
-            },
-          }),
-        });
-        if (!patchRes.ok) {
-          const text = await patchRes.text();
-          console.error('[DATE_NIGHT] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
-        } else {
-          console.log('Airtable preferences updated successfully.');
-        }
-      } else {
-        console.log('Airtable record not found for phone number:', user.phone_number);
-      }
+      await upsertAirtableRecord(
+        { Preferences: JSON.stringify(updatedPreferences) },
+        { clientId: clientIdForAirtable, cleanPhone, logTag: 'DATE_NIGHT' }
+      );
+      console.log('[DATE_NIGHT] Airtable preferences updated via client_id upsert');
     } catch (error) {
       console.error('Airtable update failed:', error);
     }
@@ -1437,55 +1563,13 @@ function buildAirtableRecordFields({ client_id, phone_number, email, tier, last_
 }
 
 async function syncToAirtable({ client_id, phone_number, email, tier, last_message }) {
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
-  const tableRef = getAirtableTableRef();
-
-  if (!apiKey || !baseId || !tableRef) {
-    return;
-  }
-
-  const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableRef)}`;
-  const keyHint =
-    apiKey.length > 12 ? `Bearer ****…${apiKey.slice(-4)}` : 'Bearer ****';
-
+  const cleanPhone = resolveCleanPhoneForAirtable(phone_number, null);
   const fields = buildAirtableRecordFields({ client_id, phone_number, email, tier, last_message });
-  const payload = {
-    records: [
-      {
-        fields,
-      },
-    ],
-  };
-
-  try {
-    console.log(`[AIRTABLE] POST ${url} (${keyHint})`);
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.log('[AIRTABLE] Sync failed but continuing to Agent...');
-      if (resp.status === 404) {
-        console.warn(
-          '[AIRTABLE] Resource not found. Check BASE_ID and TABLE_NAME in Railway.',
-          `(POST ${url})`
-        );
-      } else {
-        console.warn('[AIRTABLE] HTTP', resp.status, text.slice(0, 500));
-      }
-    }
-  } catch (err) {
-    console.log('[AIRTABLE] Sync failed but continuing to Agent...');
-    console.warn('[AIRTABLE] non-critical sync error:', err?.message || err);
-  }
+  await upsertAirtableRecord(fields, {
+    clientId: client_id,
+    cleanPhone,
+    logTag: 'AIRTABLE_SYNC',
+  });
 }
 
 // 24-hour automation nudge: hourly check for lite users whose last message was 20–23h ago
@@ -1837,7 +1921,6 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
     skipComposio: onboardingPending,
   });
   const composioGoogleSuper = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
-  const googleSuperActive = composioGoogleSuper || Boolean(user?.google_super_connected);
 
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
@@ -1860,12 +1943,8 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 
   const calendarOnboardingLink = await generateOnboardingLink(user.id);
 
-  const calProv =
-    user.calendar_provider != null && String(user.calendar_provider).trim() !== ''
-      ? String(user.calendar_provider).trim()
-      : 'N/A';
-  const calendarProviderLabel =
-    calProv !== 'N/A' ? (calProv.toLowerCase().includes('outlook') ? 'Outlook' : 'Google') : 'Not connected';
+  const calendarProviderNorm = normalizeCalendarProviderValue(user.calendar_provider);
+  const isConnected = calendarProviderNorm === 'google' || calendarProviderNorm === 'outlook';
   const archAt =
     user.architecture_synced_at != null
       ? new Date(user.architecture_synced_at).toISOString()
@@ -1881,7 +1960,6 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const activeAutomationsList = normalizeAutomationSlugs(parseUserJsonbArray(user.active_automations));
   const userPreferences = parseUserJsonbObject(user.preferences);
   const profilePrefs = userPreferences.profile || {};
-  const calendarConnected = googleSuperActive || calProv !== 'N/A';
   const dateNightIntakeRequired = needsDateNightIntake(user);
   const automationIntakePending = buildAutomationIntakePending(user);
 
@@ -1904,6 +1982,8 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - automation_intake_pending: ${automationIntakePending}
 - Preferences: ${JSON.stringify(userPreferences)}
 - date_night_intake_required: ${dateNightIntakeRequired}
+- Calendar Provider: ${calendarProviderNorm || 'None'}
+- Calendar Connected: ${isConnected ? 'True' : 'False'}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
@@ -1912,14 +1992,10 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - subscription_status: ${subscriptionStatus}
 - autonomous_execution_enabled: ${subscriptionStatus === 'PRO' || foundingMember180Window}
 - connection_status: ${JSON.stringify(connectionReport)}
-- google_super_connected: ${googleSuperActive}
-- calendar_connected: ${calendarConnected}
-- CalendarProvider: ${calendarProviderLabel}
-- calendar_provider_raw: ${calProv}
 - calendar_onboarding_link: ${calendarOnboardingLink}
 - architecture_synced_at: ${archAt}
 `;
-  const lockedOverrideBlock = !calendarConnected
+  const lockedOverrideBlock = !isConnected
     ? `
 ### VAULT CONNECTION
 - Calendar is not connected. Use calendar_onboarding_link from LIVE USER CONTEXT — do not use tools for OAuth.
@@ -1939,10 +2015,10 @@ automation_intake_pending: ${automationIntakePending}
 Run the matching FLAGSHIP AUTOMATION FRAMEWORK intake protocol before proposing execution.
 `
       : '';
-  const calendarToolBlock = calendarConnected
+  const calendarToolBlock = isConnected
     ? `
 ### CALENDAR TOOLS ACTIVE
-calendar_connected is true. You MUST call check_calendar_availability before proposing any specific date or time window.
+Calendar Connected is True. You MUST call check_calendar_availability before proposing any specific date or time window.
 `
     : '';
   const finalSystemPrompt = `${buildEliteTriageSystemPrompt()}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}`;
@@ -2113,32 +2189,41 @@ app.post('/webhook', async (req, res) => {
       if (refreshed) user = refreshed;
     }
 
-    // Systems-sync phrase: pull architecture profile into Postgres + LIVE USER CONTEXT, then continue to agent
+    // Systems-sync phrase: pull CalendarProvider from Airtable → Postgres, merge split rows
     if (incomingText === SYSTEMS_SYNC_HANDSHAKE_PHRASE) {
       const onboardingId = user.short_id || user.client_id;
       if (onboardingId) {
+        const airtableSync = await syncCalendarFromAirtableForUser(user.id, onboardingId);
+
         const raw = await fetchArchitectureProfile(onboardingId);
         const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw, {
           preserveAutomations: isOnboardingPending(user),
         });
-        if (persisted) {
-          user.calendar_provider = persisted.calendarProvider;
-          if (persisted.activeAutomations != null) {
-            user.active_automations = persisted.activeAutomations;
-          }
-          user.architecture_synced_at = new Date();
-        } else {
-          await pool.query('UPDATE users SET architecture_synced_at = NOW() WHERE id = $1', [user.id]);
-          user.architecture_synced_at = new Date();
+
+        if (!airtableSync?.calendarProvider && persisted?.calendarProvider) {
+          await pool.query(
+            `UPDATE users SET calendar_provider = $1, architecture_synced_at = NOW() WHERE id = $2`,
+            [persisted.calendarProvider, user.id]
+          );
         }
+
+        if (persisted?.activeAutomations != null && !isOnboardingPending(user)) {
+          user.active_automations = persisted.activeAutomations;
+        }
+
         await pool.query(
-          `UPDATE users SET google_super_connected = true, onboarding_phase = GREATEST(COALESCE(onboarding_phase, 1), 6) WHERE id = $1`,
+          `UPDATE users SET onboarding_phase = GREATEST(COALESCE(onboarding_phase, 1), 6) WHERE id = $1`,
           [user.id]
         );
-        user.google_super_connected = true;
-        user.onboarding_phase = Math.max(Number(user.onboarding_phase) || 1, 6);
+
+        await seedAirtableLeadRecord(user, phoneNumber);
+
+        const refreshed = await getUserByPhone(phoneNumber);
+        if (refreshed) user = refreshed;
+
         console.log('[SYNC] Systems-sync handshake processed for user:', user.id, {
-          registryFields: Boolean(persisted),
+          calendar_provider: user.calendar_provider,
+          airtableDuplicates: airtableSync?.duplicateCount || 0,
           preservedWhatsAppAutomations: isOnboardingPending(user),
         });
       } else {
@@ -2151,11 +2236,13 @@ app.post('/webhook', async (req, res) => {
       const shortId = await ensureShortIdForUser(user.id);
       if (shortId) user.short_id = shortId;
       console.log(`[VERIFICATION] Handshake detected for: ${phoneNumber}`);
-      if (!shortId) {
-        console.error('[VERIFICATION] short_id could not be assigned; google_super_connected not updated');
+      if (shortId) {
+        await syncCalendarFromAirtableForUser(user.id, shortId);
+        await seedAirtableLeadRecord(user, phoneNumber);
+        const refreshed = await getUserByPhone(phoneNumber);
+        if (refreshed) user = refreshed;
       } else {
-        await pool.query('UPDATE users SET google_super_connected = true WHERE short_id = $1', [shortId]);
-        user.google_super_connected = true;
+        console.error('[VERIFICATION] short_id could not be assigned');
       }
       await saveConversation(user.id, incomingText, HANDSHAKE_VERIFIED_ALICE_RESPONSE, {
         trigger: 'handshake_verification',
