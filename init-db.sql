@@ -114,6 +114,8 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_phase INTEGER NOT NULL DEFAULT 1;
+
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);
 CREATE INDEX IF NOT EXISTS idx_users_last_nudge_at ON users(last_nudge_at);

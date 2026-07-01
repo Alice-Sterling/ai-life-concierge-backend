@@ -391,112 +391,116 @@ function isOnboardingPending(user) {
   return status === 'pending';
 }
 
-const ELITE_TRIAGE_SYSTEM_PROMPT = `
-Role: Lead Triage Architect for Ai Life Concierge (ALC).
-Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven. You are **Alice** (the Sovereign Architect) — this Master System Prompt overrides conflicting defaults.
+/** Canonical automation slugs (WhatsApp + Airtable + Postgres). */
+const CANONICAL_AUTOMATION_SLUGS = new Set(['date_night', 'gifting', 'travel_logistics']);
 
-### MASTER SYSTEM PROMPT (Alice — CRITICAL WIRING)
-1. **Systems sync handshake:** When the user sends the exact phrase: I've now connected my calendar and enabled my automations - please sync systems to activate. — you MUST call fetch_architecture_profile (if the tool is available) with **client_id** taken from LIVE USER CONTEXT. If LIVE USER CONTEXT already lists calendar_provider, active_automations, and a recent architecture_synced_at, treat those as the synced session; only call fetch again if the user is explicitly re-syncing or data is missing/stale.
-2. **client_id:** Always pass the client_id from LIVE USER CONTEXT into fetch_architecture_profile and execute_pipedream_calendar_task.
-3. **Session context:** When the Pipedream response includes CalendarProvider and ActiveAutomations, commit them to your working memory and rely on the LIVE USER CONTEXT fields (calendar_provider, active_automations) for all subsequent turns; reference CalendarProvider in execute_pipedream_calendar_task **details** when dispatching to Pipedream.
-4. **Calendar execution:** For all calendar read/write and scheduling, use **execute_pipedream_calendar_task** only — never Composio tools for calendar or scheduling.
-5. **Horley Standard (location verification):** For logistics, trades, cleaners, and local service providers, do not assert that a business serves the user’s area until you have verified it: check published service area, postcodes, or geography (e.g. RH6, Horley, Surrey) against the user’s need. If you cannot verify, say so and offer a verification step. Align with the Sovereign Architect skill for audit depth.
-6. **180-day Founding Member lifecycle:** Use trial_start_date (or created_at) as day 0 of enrollment. For **days 0–180** from that anchor, apply Founding Member treatment: priority framing, partnership in building their Concierge, and lifecycle-aware check-ins. **After day 180**, unless they are PRO, shift to the standard member cadence for automation scope and trial/founding copy. Use days_since_enrollment and founding_member_180_window from LIVE USER CONTEXT when deciding tone.
+/** Map web/Airtable legacy slugs → canonical slugs. */
+const LEGACY_AUTOMATION_SLUG_MAP = {
+  flowers_card_delivery: 'gifting',
+  milestone_proposals: 'gifting',
+  flowers: 'gifting',
+  milestones: 'gifting',
+  gifting: 'gifting',
+  date_night: 'date_night',
+  travel_logistics: 'travel_logistics',
+  travel: 'travel_logistics',
+};
 
-Standard Opening (Welcome Hook / Menu of Autonomy):
-If this is the user's first interaction or they are just saying hello, respond with:
-"Architect here. I am currently in Delight-First mode. You can ask me to:
+function normalizeAutomationSlugs(input) {
+  const raw = Array.isArray(input)
+    ? input
+    : typeof input === 'string'
+      ? input.split(/[,\s]+/)
+      : [];
+  const out = new Set();
+  for (const item of raw) {
+    const s = String(item).trim().toLowerCase();
+    if (!s) continue;
+    const canonical = LEGACY_AUTOMATION_SLUG_MAP[s] || s;
+    if (CANONICAL_AUTOMATION_SLUGS.has(canonical)) {
+      out.add(canonical);
+    }
+  }
+  return [...out];
+}
 
-Curate & Verify: Research and provide verified booking/purchasing links for any request.
+function formatAutomationSlugList(slugs) {
+  const normalized = normalizeAutomationSlugs(slugs);
+  return normalized.length ? normalized.join(', ') : 'None';
+}
 
-Logistical Prediction: I can analyze your week to find friction you haven't seen yet.
+function needsDateNightIntake(user) {
+  const prefs = parseUserJsonbObject(user?.preferences);
+  if (prefs.date_night && typeof prefs.date_night === 'object') return false;
+  if (prefs.date_night_intake_required === true) return true;
+  const automations = normalizeAutomationSlugs(parseUserJsonbArray(user?.active_automations));
+  return automations.includes('date_night') && !isOnboardingPending(user);
+}
 
-Autonomous Execution (Pro): I link to your calendar and apps to handle the 'doing' while you simply approve.
+function buildEliteTriageSystemPrompt() {
+  const systemTime = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
+  return `[SYSTEM PROTOCOL] Current System Time: ${systemTime}. The master location is Horley, England (RH6). All temporal calculations (tomorrow, next week, current trial status) must be based strictly on this timestamp.
 
-I am eager to begin. What is the most time-consuming task on your mind today?"
+ROLE: Alice, The Lifestyle Architect
+Persona: You are an elite, predictive AI concierge. You do not "help"; you "engineer outcomes." Your communication is concise, logical, and void of conversational filler.
 
-Operating logic:
-- DELIGHT FIRST: Provide a curated recommendation with a verified link. Include a concise WHY and the next best action (booking/calendar link where relevant).
-- SOFT NUDGE (Lite Users): Describe Pro Vault benefits: predictive logistics, human-in-the-loop oversight, and ~10 hours recovered weekly.
-- CLOSING: "Would you like to activate a 30-day Concierge Pro Trial to automate this entire workflow?"
+### LIVE STATE (READ FIRST)
+The Node.js backend injects LIVE USER CONTEXT on every message. Trust it absolutely. Do not ask the user for information already present there (email, Client ID, calendar_provider, Active Automations, onboarding phase). Do not instruct the user to call external webhooks or Pipedream — the backend syncs Airtable and calendar state before you respond.
 
-Agentic Auditing (mandatory):
-1. MANDATORY EMAIL RULE: If a user expresses interest in a trial (e.g. says yes, trial, sign up, activate), you MUST NOT proceed with any other task until you have confirmed their email address. If they have not yet provided it, your ONLY response must be a polite request for their email—do not answer other questions or offer links until the email is received.
-2. INQUISITIVE DELIGHT: When providing a recommendation, you must also ask one follow-up question that targets "Time Leakage"—e.g. "I've found the booking link for [Restaurant]. Out of curiosity, how many hours a month do you spend managing these types of administrative logistics?"
-3. PREDICTIVE STAGING: Always suggest one "Automated Next Step"—e.g. "I have the flight details. In the Pro Vault, I would now cross-reference this with your weather app and stage a car for your arrival. Would you like to see how we automate that?"
+1. SOVEREIGN LIFECYCLE & STATE
+You have access to the user's LIVE STATE via the context block provided by the system.
+- Founding Member Trial: 180 days of full autonomous execution. Compare the Current System Time against the user's trial_start_date / created_at and days_since_enrollment in LIVE USER CONTEXT.
+- Lite Phase: If the 180-day founding_member_180_window is false and subscription_status is not PRO, downgrade to research-only mode. Inform the user: "Autonomous layer expired. Upgrade to reactivate execution."
 
-Composio execution (when integrations are connected):
-- You may execute real actions on the user's linked non-calendar apps via Composio using the tool named execute_action.
-- Call execute_action with: tool_slug (exact Composio tool identifier), arguments (object matching that tool's schema), and connected_account_id when the user has multiple connections for the same toolkit.
-- Use execute_action only when it genuinely advances the user's request; otherwise continue with guidance and verified links.
-- FORBIDDEN for execute_action: any Google Calendar, Microsoft/Outlook calendar, scheduling, free/busy, event creation, event listing, or meeting-slot logic — those are never Composio in this system.
+2. CALENDAR PROTOCOL & OPPORTUNITY SCANNING
+If LIVE USER CONTEXT shows a connected calendar_provider (Google/Outlook) or google_super_connected is true, act as a temporal architect:
+- Proactive Scanning: Before proposing any date, time, or reservation (e.g. Date Night), use execute_pipedream_calendar_task (read_calendar or find_slot) to check availability. Pass client_id and CalendarProvider from LIVE USER CONTEXT in the details string.
+- Conflict Resolution: Never propose an itinerary that overlaps existing calendar events.
+- Contextual Awareness: If the user says "next weekend", use Current System Time to calculate exact dates, then scan the calendar for those dates.
+- Never use Composio execute_action for calendar operations. OAuth linking is web-only via calendar_onboarding_link.
 
-CALENDAR EXECUTION PROTOCOL (mandatory when calendar or scheduling is involved):
-- Primary engine: ALL calendar and scheduling operations MUST go through execute_pipedream_calendar_task only. Do not use execute_action or any Composio path for reading/writing the user's calendar, finding time, or booking events.
-- Before ANY execute_pipedream_calendar_task call, use fetch_architecture_profile (if available) with client_id from LIVE USER CONTEXT, read the response for CalendarProvider (or equivalent), and base your Pipedream command on that provider. Reference CalendarProvider in your reasoning and, where helpful, in the details string so Pipedream dispatches correctly.
-- Action mapping: if the user (or you) is finding a gap, a window, or availability — use action "find_slot". If they want to book, schedule, or create a calendar event — use action "create_event". For a general read of what's on the calendar or a time range — use "read_calendar".
-- OAuth: never use these tools to link accounts; use web onboarding only (calendar_onboarding_link).
+3. THE SECURE HANDSHAKE (SYNC PROTOCOL)
+When a user provides the activation phrase: "I've now connected my calendar and enabled my automations - please sync systems to activate."
+- Read LIVE USER CONTEXT (already updated by the backend). Do not call fetch_architecture_profile unless architecture_synced_at is N/A and calendar_provider is missing.
+- Acknowledge: "Logic staged. I have identified your [Google/Outlook] sync and initialized [Active Automations from context]. I am now engineering your first outcome."
 
-Pipedream calendar (execute_pipedream_calendar_task):
-- Pass client_id from LIVE USER CONTEXT, one of read_calendar | create_event | find_slot, and a details string (times, dates, titles; include provider context from fetch_architecture_profile when relevant).
+4. CORE SKILL: THE "HORLEY" STANDARD (Logistics)
+For every physical request (flowers, dining, services):
+- Verify Location: Use vault and web search results to find top-tier options.
+- Verify Coverage: Scan business websites for "RH6", "Horley", or "Surrey".
+- Availability: Cross-reference operating hours against the user's connected calendar when scheduling.
 
-Calendar / Vault connection (web onboarding only):
-- Do not use any tool to connect OAuth or link a new Google account. Account linking is never done via chat tools.
-- When the user asks to connect their calendar, sync Google, or open the Vault (and that is the main request), respond with exactly this sentence, substituting the URL from LIVE USER CONTEXT (field calendar_onboarding_link) for [LINK] — output the full URL with no modification:
+5. REQUEST QUALIFICATION & FALLBACK
+Constraint Check: If a request has 5+ variables or requires physical presence beyond digital booking, trigger Human Fallback.
+Fallback Routing: End with handover to assist@ailifeconcierge.co.uk.
+Logic: "This request requires a human execution layer. Staging hand-off to the concierge desk now."
+
+### CALENDAR VAULT LINK (web OAuth only)
+When the user must connect their calendar, respond with exactly (substitute calendar_onboarding_link from LIVE USER CONTEXT for [LINK]):
 I've prepared your secure vault access. Please complete the handshake here to sync your calendar: [LINK]
 
 ### CONVERSATIONAL ONBOARDING PROTOCOL
-Trigger: If LIVE USER CONTEXT shows Onboarding Status: pending or Email: N/A.
-Execution: You must guide the user through a frictionless onboarding. DO NOT send a wall of text or multiple questions at once. Ask exactly ONE phase at a time. Wait for the user's reply before proceeding. Frame questions around unlocking value.
+Trigger: LIVE USER CONTEXT shows Onboarding Status: pending OR onboarding_phase < 8.
+Execution: One phase per message. Wait for reply before advancing. Use onboarding_phase in LIVE USER CONTEXT as your anchor.
 
-Phase 1 (Identity): 'Welcome to the AI Life Concierge. I am Alice. To initialize your secure profile, please reply with your first and last name, and your preferred email.'
+Phase 1 (Identity): Welcome. Ask for first and last name and preferred email.
+Phase 2 (Profile): Ask which profile fits (1–4): Founder/CEO, Executive/Professional, Investor/Family Office, Creative/Artist.
+Phase 3 (Friction): Map reply. Ask where to deploy value (1–4): Relationship & Milestone Management, Event & Lifestyle Curation, Bespoke Sourcing, Coordinating Logistics. If user picks multiple, store the primary in friction_points and note secondary in conversation.
+Phase 4 (Commitment): Map reply. Ask partnership structure (1–3): fully-managed lifestyle partner, self-hosted/DIY AI tools, team/office exploration.
+Phase 5 (Calendar): Do not pitch automations until calendar is connected. Send Vault link. Stay here until google_super_connected is true OR calendar_provider is set in LIVE USER CONTEXT.
+Phase 6 (Verification): Backend sync is complete when calendar_provider appears in LIVE USER CONTEXT. Read calendar_provider and Active Automations from context — do not call fetch_architecture_profile unless data is missing.
+Phase 7 (Automations): Pitch flagship automations (canonical slugs only):
+• date_night — bi-weekly recommendations, calendar conflict checking, booking staging
+• gifting — milestone and key-date curation
+• travel_logistics — flight detection, itinerary buffers, ground transport
+Lead with automations matching Phase 3 friction. Wait for explicit choices.
+Phase 8 (Commit): Call save_onboarding_profile with Phases 1–4 as human-readable strings (not menu numbers) and active_automations as canonical slugs only: date_night, gifting, travel_logistics. Then say: "Profile architected successfully. I am ready for your first request."
 
-Phase 2 (Profile): Acknowledge their name. Ask: 'To calibrate my execution to your specific lifestyle, which profile best fits you? (Reply 1-4)
+### DATE NIGHT INTAKE PROTOCOL (MANDATORY AFTER PHASE 8)
+If LIVE USER CONTEXT shows date_night_intake_required: true, your very next response after save_onboarding_profile MUST begin Date Night intake: ask preferred neighborhoods, average budget, favorite cuisines, and dietary restrictions (one topic at a time or one concise grouped ask). When complete, call save_date_night_preferences immediately.
 
-Founder / CEO
-
-Executive / Professional
-
-Investor / Family Office
-
-Creative / Artist'
-
-Phase 3 (Friction / Value): Map their numeric reply to the occupation. Then ask: 'Understood. Where can I deploy immediate value and remove friction for you today? (Reply 1-4)
-
-Relationship & Milestone Management
-
-Event & Lifestyle Curation
-
-Bespoke Sourcing
-
-Coordinating Logistics'
-
-Phase 4 (Commitment): Map their numeric reply. Then ask: 'Finally, how should we structure our partnership? (Reply 1-3)
-
-I need a fully-managed lifestyle partner
-
-I am interested in self-hosted/DIY AI tools
-
-I am exploring options for my team/office'
-
-Phase 5 (Calendar Connection — mandatory gate): Acknowledge their partnership choice. You MUST NOT pitch automations or call save_onboarding_profile until the calendar is connected. Deliver the secure Vault link using the exact sentence from "Calendar / Vault connection" above, substituting calendar_onboarding_link from LIVE USER CONTEXT for [LINK]. Tell them that connecting their calendar is the master key that unlocks autonomous execution. Wait for their reply. If LIVE USER CONTEXT shows google_super_connected is false, you remain at this phase — re-send the link politely if they have not completed OAuth; do not advance.
-
-Phase 6 (Systems Verification): Once google_super_connected is true (or after the user sends the exact systems-sync phrase: I've now connected my calendar and enabled my automations - please sync systems to activate.), you MUST call fetch_architecture_profile with client_id from LIVE USER CONTEXT before proceeding. Confirm calendar_provider and active_automations are reflected in LIVE USER CONTEXT. Do not skip this verification step.
-
-Phase 7 (Automation Pitch — post-verification only): Immediately after calendar verification, transition to pitching flagship automations before profile commit. One message at a time. Explain that their connected calendar unlocks our first three flagship automations:
-• Date Night (slug: date_night): Automated bi-weekly recommendations, calendar conflict checking, and booking.
-• Gifting (slug: gifting): Tracking key dates for partners and clients with automated curation.
-• Travel Logistics (slug: travel_logistics): Auto-detecting flights, managing itinerary buffers, and ground transport.
-
-Dynamic pitching: Lead with the automation that best resolves the friction_points they chose in Phase 3 — Relationship & Milestone Management → prioritize Gifting and Date Night; Event & Lifestyle Curation → Date Night; Bespoke Sourcing → Gifting; Coordinating Logistics → Travel Logistics. Ask which of the three they want activated now (they may choose one, two, or all three). Mention that while these three are available immediately, you will continue building custom automations and gathering deeper preferences as the partnership evolves. Wait for explicit agreement before advancing.
-
-Phase 8 (Profile Commit): Map their automation choices to slug strings only (date_night, gifting, travel_logistics). Say: 'Profile architected successfully. I am ready for your first request.' Immediately call save_onboarding_profile with the translated string values from Phases 1–4 (do not pass raw menu numbers), plus active_automations populated with every automation slug they explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting"]). Omit slugs they declined.
-
-### DATE NIGHT INTAKE PROTOCOL
-If date_night is listed in the user's LIVE USER CONTEXT under Active Automations, but their Preferences object does not contain a date_night key, you must proactively initiate the Date Night Intake. Seamlessly transition the conversation to ask for their preferred neighborhoods, average budget, favorite cuisines, and any dietary restrictions. Once gathered, immediately use the save_date_night_preferences tool to permanently store this data.
-
-Constraint: Elite, professional tone. Economical but powerful language. No emojis.
-`;
+Constraint: Elite, professional tone. Economical language. No emojis.`;
+}
 
 const NEW_LEAD_ALERT_EMAIL = 'assist@ailifeconcierge.co.uk';
 const REQUEST_SUMMARY_EMAIL = 'assist@ailifeconcierge.co.uk';
@@ -558,7 +562,7 @@ const SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'Automation slugs the user explicitly agreed to in Phase 7 (e.g. ["date_night", "gifting", "travel_logistics"]). Required at profile commit when automations were pitched.',
+          'Canonical automation slugs only: date_night, gifting, travel_logistics (legacy web slugs are normalized automatically).',
       },
       preferences: {
         type: 'object',
@@ -621,7 +625,7 @@ const EXECUTE_ACTION_ANTHROPIC_TOOL = {
 const FETCH_ARCHITECTURE_PROFILE_ANTHROPIC_TOOL = {
   name: 'fetch_architecture_profile',
   description:
-    'Retrieves validated onboarding data from the Airtable registry (or Pipedream fallback when configured), including CalendarProvider and ActiveAutomations. Required when the user sends the exact systems-sync handshake (see system prompt) or when those fields are not yet in LIVE USER CONTEXT. Pass client_id from LIVE USER CONTEXT.',
+    'Retrieves registry data when LIVE USER CONTEXT is stale. The backend normally syncs Airtable before you respond — prefer reading calendar_provider and Active Automations from LIVE USER CONTEXT. Only call if architecture_synced_at is N/A or the user explicitly requests re-sync.',
   input_schema: {
     type: 'object',
     properties: {
@@ -704,11 +708,12 @@ async function fetchArchitectureProfile(clientId) {
         airtableFields.calendar_provider ??
         airtableFields['Calendar Provider'] ??
         null,
-      ActiveAutomations:
+      ActiveAutomations: normalizeAutomationSlugs(
         airtableFields.ActiveAutomations ??
-        airtableFields.active_automations ??
-        airtableFields['Active Automations'] ??
-        null,
+          airtableFields.active_automations ??
+          airtableFields['Active Automations'] ??
+          []
+      ),
     };
     console.log('[SYNC] Architecture profile loaded from Airtable for', cid);
     return JSON.stringify(payload);
@@ -746,7 +751,8 @@ function extractArchitectureSessionFields(data) {
 /**
  * Parse successful Pipedream body text; persist to users. Returns { calendarProvider, activeAutomations } or null.
  */
-async function persistArchitectureSessionFromPipedreamResponse(userId, rawText) {
+async function persistArchitectureSessionFromPipedreamResponse(userId, rawText, options = {}) {
+  const { preserveAutomations = false } = options;
   const id = String(userId ?? '').trim();
   if (!id || rawText == null) return null;
   const t = String(rawText).trim();
@@ -760,36 +766,42 @@ async function persistArchitectureSessionFromPipedreamResponse(userId, rawText) 
   if (data && typeof data === 'object' && data.error) return null;
   const { calendarProvider, activeAutomations } = extractArchitectureSessionFields(data);
   const calStr = calendarProvider != null ? String(calendarProvider) : null;
-  const autoJson =
-    activeAutomations == null
-      ? '[]'
-      : Array.isArray(activeAutomations)
-        ? JSON.stringify(activeAutomations)
-        : typeof activeAutomations === 'string'
-          ? (() => {
-              try {
-                const parsed = JSON.parse(activeAutomations);
-                return JSON.stringify(Array.isArray(parsed) ? parsed : [activeAutomations]);
-              } catch {
-                return JSON.stringify(
-                  activeAutomations
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean)
-                );
-              }
-            })()
-          : JSON.stringify(activeAutomations);
+  const normalizedAutos = normalizeAutomationSlugs(activeAutomations);
+  const autoJson = JSON.stringify(normalizedAutos);
+
   try {
-    await pool.query(
-      `UPDATE users SET calendar_provider = $1, active_automations = $2::jsonb, architecture_synced_at = NOW() WHERE id = $3::uuid`,
-      [calStr, autoJson, id]
-    );
+    if (preserveAutomations) {
+      await pool.query(
+        `UPDATE users SET calendar_provider = $1, architecture_synced_at = NOW() WHERE id = $2::uuid`,
+        [calStr, id]
+      );
+    } else {
+      await pool.query(
+        `UPDATE users SET calendar_provider = $1, active_automations = $2::jsonb, architecture_synced_at = NOW() WHERE id = $3::uuid`,
+        [calStr, autoJson, id]
+      );
+    }
   } catch (err) {
     console.error('[SYNC] persist architecture session failed:', err?.message || err);
     return null;
   }
-  return { calendarProvider: calStr, activeAutomations: autoJson };
+  return {
+    calendarProvider: calStr,
+    activeAutomations: preserveAutomations ? null : autoJson,
+  };
+}
+
+async function resetOnboardingState(userId) {
+  await pool.query(
+    `UPDATE users
+     SET onboarding_status = 'pending',
+         onboarding_phase = 1,
+         active_automations = '[]'::jsonb,
+         preferences = '{}'::jsonb
+     WHERE id = $1`,
+    [userId]
+  );
+  console.log('[ONBOARDING] reset for user:', userId);
 }
 
 const PIPEDREAM_CALENDAR_ACTIONS = ['read_calendar', 'create_event', 'find_slot'];
@@ -895,15 +907,22 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
   const occupation = String(toolInput?.occupation ?? '').trim();
   const friction_points = String(toolInput?.friction_points ?? '').trim();
   const service_commitment = String(toolInput?.service_commitment ?? '').trim();
-  const active_automations = Array.isArray(toolInput?.active_automations)
-    ? toolInput.active_automations.map((item) => String(item).trim()).filter(Boolean)
-    : [];
-  const preferences =
+  const normalizedAutomations = normalizeAutomationSlugs(toolInput?.active_automations || []);
+  const incomingPrefs =
     toolInput?.preferences != null &&
     typeof toolInput.preferences === 'object' &&
     !Array.isArray(toolInput.preferences)
       ? toolInput.preferences
       : {};
+  const preferences = {
+    ...incomingPrefs,
+    profile: {
+      occupation,
+      friction_points,
+      service_commitment,
+    },
+    date_night_intake_required: normalizedAutomations.includes('date_night'),
+  };
 
   await pool.query(
     `UPDATE users
@@ -911,6 +930,7 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
          last_name = $2,
          email = $3,
          onboarding_status = 'complete',
+         onboarding_phase = 8,
          active_automations = $5::jsonb,
          preferences = $6::jsonb
      WHERE id = $4`,
@@ -919,7 +939,7 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
       last_name,
       email,
       userId,
-      JSON.stringify(active_automations),
+      JSON.stringify(normalizedAutomations),
       JSON.stringify(preferences),
     ]
   );
@@ -973,7 +993,7 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
         Occupation: occupation,
         'Friction Points': friction_points,
         'Service Commitment': service_commitment,
-        ActiveAutomations: JSON.stringify(active_automations || []),
+        ActiveAutomations: JSON.stringify(normalizedAutomations),
         Preferences: JSON.stringify(preferences || {}),
       };
 
@@ -995,10 +1015,15 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
     }
   }
 
+  const dateNightIntakeRequired = normalizedAutomations.includes('date_night');
+
   return JSON.stringify({
     success: true,
-    message:
-      'Onboarding profile committed to the database (onboarding_status: complete). Marketing and operational records synced when configured.',
+    date_night_intake_required: dateNightIntakeRequired,
+    active_automations: normalizedAutomations,
+    message: dateNightIntakeRequired
+      ? 'Onboarding profile committed. Begin Date Night intake immediately in your next reply (neighborhood, budget, cuisines, dietary restrictions), then call save_date_night_preferences.'
+      : 'Onboarding profile committed to the database (onboarding_status: complete). Marketing and operational records synced when configured.',
   });
 }
 
@@ -1044,6 +1069,7 @@ async function saveDateNightPreferences(userId, toolInput) {
   const updatedPreferences = {
     ...currentPreferences,
     date_night: { neighborhood, budget, cuisines, dietary_restrictions },
+    date_night_intake_required: false,
   };
 
   await pool.query('UPDATE users SET preferences = $1::jsonb WHERE id = $2', [
@@ -1392,7 +1418,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, active_automations, preferences FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_phase, active_automations, preferences FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -1404,7 +1430,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, active_automations, preferences`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_phase, active_automations, preferences`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -1449,7 +1475,7 @@ async function getHybridResponseFromMessages(
     toolbox?.toolboxSummary && String(toolbox.toolboxSummary).trim()
       ? `\n\n[Composio toolbox for this user]\n${toolbox.toolboxSummary}`
       : '';
-  const system = (baseSystemPrompt || ELITE_TRIAGE_SYSTEM_PROMPT) + composioSupplement;
+  const system = (baseSystemPrompt || buildEliteTriageSystemPrompt()) + composioSupplement;
   const hasAnthropicTools = Boolean(toolbox?.anthropicTools?.length);
 
   // --- TRY CLAUDE FIRST ---
@@ -1649,7 +1675,6 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
 
-  const masterSkill = getMasterSkill();
   const trialStart = user.trial_start_date ?? user.created_at;
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
@@ -1672,6 +1697,8 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
     user.calendar_provider != null && String(user.calendar_provider).trim() !== ''
       ? String(user.calendar_provider).trim()
       : 'N/A';
+  const calendarProviderLabel =
+    calProv !== 'N/A' ? (calProv.toLowerCase().includes('outlook') ? 'Outlook' : 'Google') : 'Not connected';
   const archAt =
     user.architecture_synced_at != null
       ? new Date(user.architecture_synced_at).toISOString()
@@ -1680,8 +1707,15 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
     user.onboarding_status != null && String(user.onboarding_status).trim() !== ''
       ? String(user.onboarding_status).trim()
       : 'pending';
-  const activeAutomationsList = parseUserJsonbArray(user.active_automations);
+  const onboardingPhase =
+    user.onboarding_phase != null && Number.isFinite(Number(user.onboarding_phase))
+      ? Number(user.onboarding_phase)
+      : 1;
+  const activeAutomationsList = normalizeAutomationSlugs(parseUserJsonbArray(user.active_automations));
   const userPreferences = parseUserJsonbObject(user.preferences);
+  const profilePrefs = userPreferences.profile || {};
+  const calendarConnected = googleSuperActive || calProv !== 'N/A';
+  const dateNightIntakeRequired = needsDateNightIntake(user);
 
   const dynamicContext = `
 ### LIVE USER CONTEXT
@@ -1692,29 +1726,43 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   })()}
 - Email: ${user.email != null && String(user.email).trim() !== '' ? user.email : 'N/A'}
 - First Name: ${user.first_name != null && String(user.first_name).trim() !== '' ? user.first_name : 'N/A'}
+- Last Name: ${user.last_name != null && String(user.last_name).trim() !== '' ? user.last_name : 'N/A'}
 - Onboarding Status: ${onboardingStatus}
-- Active Automations: ${activeAutomationsList.length ? activeAutomationsList.join(', ') : 'None'}
+- onboarding_phase: ${onboardingPhase}
+- Occupation: ${profilePrefs.occupation || 'N/A'}
+- Friction Points: ${profilePrefs.friction_points || 'N/A'}
+- Service Commitment: ${profilePrefs.service_commitment || 'N/A'}
+- Active Automations: ${formatAutomationSlugList(activeAutomationsList)}
 - Preferences: ${JSON.stringify(userPreferences)}
+- date_night_intake_required: ${dateNightIntakeRequired}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
 - days_since_enrollment: ${daysSinceEnrollment}
 - founding_member_180_window: ${foundingMember180Window}
 - subscription_status: ${subscriptionStatus}
-- autonomous_execution_enabled: ${subscriptionStatus === 'PRO'}
+- autonomous_execution_enabled: ${subscriptionStatus === 'PRO' || foundingMember180Window}
 - connection_status: ${JSON.stringify(connectionReport)}
 - google_super_connected: ${googleSuperActive}
+- calendar_connected: ${calendarConnected}
+- CalendarProvider: ${calendarProviderLabel}
+- calendar_provider_raw: ${calProv}
 - calendar_onboarding_link: ${calendarOnboardingLink}
-- calendar_provider: ${calProv}
 - architecture_synced_at: ${archAt}
 `;
-  const lockedOverrideBlock = !googleSuperActive
+  const lockedOverrideBlock = !calendarConnected
     ? `
-### VAULT CONNECTION (google_super)
-- google_super is not ACTIVE. For calendar sync / Vault access, use the sentence and calendar_onboarding_link from your main instructions — do not use tools for OAuth or linking.
+### VAULT CONNECTION
+- Calendar is not connected. Use calendar_onboarding_link from LIVE USER CONTEXT — do not use tools for OAuth.
 `
     : '';
-  const finalSystemPrompt = `${ELITE_TRIAGE_SYSTEM_PROMPT}\n\n${masterSkill}\n\n${dynamicContext}${lockedOverrideBlock}`;
+  const dateNightBlock = dateNightIntakeRequired
+    ? `
+### REQUIRED ACTION: DATE NIGHT INTAKE
+date_night_intake_required is true. Initiate Date Night preference collection now. After collecting neighborhood, budget, cuisines, and dietary restrictions, call save_date_night_preferences.
+`
+    : '';
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt()}\n\n${dynamicContext}${lockedOverrideBlock}${dateNightBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,
@@ -1765,7 +1813,7 @@ async function getClaudeResponse(userTier, userMessage) {
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 256,
-    system: ELITE_TRIAGE_SYSTEM_PROMPT,
+    system: buildEliteTriageSystemPrompt(),
     messages: [
       {
         role: 'user',
@@ -1876,24 +1924,39 @@ app.post('/webhook', async (req, res) => {
 
     const incomingText = String(req.body.Body || '').trim();
 
+    if (/\b(reset|start over).*(onboarding|flow)\b/i.test(incomingText)) {
+      await resetOnboardingState(user.id);
+      const refreshed = await getUserByPhone(phoneNumber);
+      if (refreshed) user = refreshed;
+    }
+
     // Systems-sync phrase: pull architecture profile into Postgres + LIVE USER CONTEXT, then continue to agent
     if (incomingText === SYSTEMS_SYNC_HANDSHAKE_PHRASE) {
       const onboardingId = user.short_id || user.client_id;
       if (onboardingId) {
         const raw = await fetchArchitectureProfile(onboardingId);
-        const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw);
+        const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw, {
+          preserveAutomations: isOnboardingPending(user),
+        });
         if (persisted) {
           user.calendar_provider = persisted.calendarProvider;
-          user.active_automations = persisted.activeAutomations;
+          if (persisted.activeAutomations != null) {
+            user.active_automations = persisted.activeAutomations;
+          }
           user.architecture_synced_at = new Date();
         } else {
           await pool.query('UPDATE users SET architecture_synced_at = NOW() WHERE id = $1', [user.id]);
           user.architecture_synced_at = new Date();
         }
-        await pool.query('UPDATE users SET google_super_connected = true WHERE id = $1', [user.id]);
+        await pool.query(
+          `UPDATE users SET google_super_connected = true, onboarding_phase = GREATEST(COALESCE(onboarding_phase, 1), 6) WHERE id = $1`,
+          [user.id]
+        );
         user.google_super_connected = true;
+        user.onboarding_phase = Math.max(Number(user.onboarding_phase) || 1, 6);
         console.log('[SYNC] Systems-sync handshake processed for user:', user.id, {
           registryFields: Boolean(persisted),
+          preservedWhatsAppAutomations: isOnboardingPending(user),
         });
       } else {
         console.warn('[SYNC] Systems-sync phrase but missing short_id/client_id');
