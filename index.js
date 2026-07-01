@@ -437,6 +437,26 @@ function needsDateNightIntake(user) {
   return automations.includes('date_night') && !isOnboardingPending(user);
 }
 
+function buildAutomationIntakePending(user) {
+  const automations = normalizeAutomationSlugs(parseUserJsonbArray(user?.active_automations));
+  const prefs = parseUserJsonbObject(user?.preferences);
+  const pending = [];
+  if (automations.includes('date_night') && !prefs.date_night) {
+    pending.push(
+      'date_night: neighborhood, cuisine dislikes, budget tier, dietary restrictions; then check_calendar_availability'
+    );
+  }
+  if (automations.includes('gifting') && !prefs.gifting) {
+    pending.push('gifting: recipient name, relationship, milestone date, delivery address');
+  }
+  if (automations.includes('travel_logistics') && !prefs.travel_logistics) {
+    pending.push(
+      'travel_logistics: destination, duration, travel style, hard constraints; then check_calendar_availability'
+    );
+  }
+  return pending.length ? pending.join(' | ') : 'none';
+}
+
 function buildEliteTriageSystemPrompt() {
   const systemTime = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
   return `[SYSTEM PROTOCOL] Current System Time: ${systemTime}. The master location is Horley, England (RH6). All temporal calculations (tomorrow, next week, current trial status) must be based strictly on this timestamp.
@@ -453,11 +473,11 @@ You have access to the user's LIVE STATE via the context block provided by the s
 - Lite Phase: If the 180-day founding_member_180_window is false and subscription_status is not PRO, downgrade to research-only mode. Inform the user: "Autonomous layer expired. Upgrade to reactivate execution."
 
 2. CALENDAR PROTOCOL & OPPORTUNITY SCANNING
-If LIVE USER CONTEXT shows a connected calendar_provider (Google/Outlook) or google_super_connected is true, act as a temporal architect:
-- Proactive Scanning: Before proposing any date, time, or reservation (e.g. Date Night), use execute_pipedream_calendar_task (read_calendar or find_slot) to check availability. Pass client_id and CalendarProvider from LIVE USER CONTEXT in the details string.
-- Conflict Resolution: Never propose an itinerary that overlaps existing calendar events.
-- Contextual Awareness: If the user says "next weekend", use Current System Time to calculate exact dates, then scan the calendar for those dates.
-- Never use Composio execute_action for calendar operations. OAuth linking is web-only via calendar_onboarding_link.
+If LIVE USER CONTEXT shows calendar_connected: true, you are a temporal architect. You CANNOT infer availability from text alone.
+- Mandatory Tool: Before proposing ANY specific date, time, reservation window, or itinerary slot, you MUST call check_calendar_availability with ISO 8601 start_time and end_time covering the proposed window, plus intent (e.g. "date night proposal").
+- Wait for the tool result. Only propose times that fall within returned free/busy gaps. Never propose slots that overlap busy periods.
+- Contextual Awareness: If the user says "next weekend", calculate exact dates from Current System Time, then call check_calendar_availability for that range before suggesting options.
+- Use execute_pipedream_calendar_task only for explicit calendar writes (create_event) after availability is confirmed. Never use Composio execute_action for calendar reads or writes. OAuth is web-only via calendar_onboarding_link.
 
 3. THE SECURE HANDSHAKE (SYNC PROTOCOL)
 When a user provides the activation phrase: "I've now connected my calendar and enabled my automations - please sync systems to activate."
@@ -496,8 +516,26 @@ Phase 7 (Automations): Pitch flagship automations (canonical slugs only):
 Lead with automations matching Phase 3 friction. Wait for explicit choices.
 Phase 8 (Commit): Call save_onboarding_profile with Phases 1–4 as human-readable strings (not menu numbers) and active_automations as canonical slugs only: date_night, gifting, travel_logistics. Then say: "Profile architected successfully. I am ready for your first request."
 
-### DATE NIGHT INTAKE PROTOCOL (MANDATORY AFTER PHASE 8)
-If LIVE USER CONTEXT shows date_night_intake_required: true, your very next response after save_onboarding_profile MUST begin Date Night intake: ask preferred neighborhoods, average budget, favorite cuisines, and dietary restrictions (one topic at a time or one concise grouped ask). When complete, call save_date_night_preferences immediately.
+### FLAGSHIP AUTOMATION FRAMEWORK
+When Active Automations in LIVE USER CONTEXT includes a slug below, run that automation's intake protocol before execution. Check automation_intake_pending in LIVE USER CONTEXT. One automation at a time unless the user requests multiple.
+
+General Rule: For any automation involving dates or times, complete intake first, then call check_calendar_availability before proposing specific slots.
+
+**date_night** (slug: date_night)
+Intake required: preferred neighborhood(s), cuisine dislikes, budget tier, dietary restrictions.
+Then: call check_calendar_availability for the target evening window before proposing a date night slot.
+When complete: call save_date_night_preferences.
+
+**gifting** (slug: gifting)
+Intake required: recipient name, relationship to user, upcoming milestone/date, delivery address.
+Store answers in conversation until a gifting preferences tool exists; confirm summary with the user before staging curation.
+
+**travel_logistics** (slug: travel_logistics)
+Intake required: destination, trip duration, preferred travel style (e.g. boutique vs luxury resort), hard constraints (dates, budget cap, accessibility).
+Then: call check_calendar_availability across the travel window to identify conflicts with existing commitments before proposing itinerary.
+
+### DATE NIGHT INTAKE (POST PHASE 8)
+If date_night_intake_required: true, begin date_night intake immediately after save_onboarding_profile per the framework above.
 
 Constraint: Elite, professional tone. Economical language. No emojis.`;
 }
@@ -806,6 +844,30 @@ async function resetOnboardingState(userId) {
 
 const PIPEDREAM_CALENDAR_ACTIONS = ['read_calendar', 'create_event', 'find_slot'];
 
+const CHECK_CALENDAR_AVAILABILITY_ANTHROPIC_TOOL = {
+  name: 'check_calendar_availability',
+  description:
+    'Query the user calendar free/busy for a time window via Pipedream. REQUIRED before proposing any specific date, time, or reservation. The backend resolves client_id from the user record. Returns busy periods and free gaps.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      start_time: {
+        type: 'string',
+        description: 'Window start in ISO 8601 (e.g. 2026-07-05T18:00:00+01:00).',
+      },
+      end_time: {
+        type: 'string',
+        description: 'Window end in ISO 8601 (e.g. 2026-07-05T23:00:00+01:00).',
+      },
+      intent: {
+        type: 'string',
+        description: 'Purpose of the scan (e.g. "date night proposal", "travel conflict check").',
+      },
+    },
+    required: ['start_time', 'end_time', 'intent'],
+  },
+};
+
 const EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL = {
   name: 'execute_pipedream_calendar_task',
   description:
@@ -834,6 +896,107 @@ function getPipedreamCalendarAnthropicTools() {
   const url = process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL;
   if (!url || !String(url).trim()) return [];
   return [EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL];
+}
+
+function getCalendarAvailabilityAnthropicTools() {
+  return [CHECK_CALENDAR_AVAILABILITY_ANTHROPIC_TOOL];
+}
+
+/**
+ * POST free/busy query to Pipedream. Set PIPEDREAM_CALENDAR_QUERY_WEBHOOK.
+ * Body: { client_id, start_time, end_time, intent, calendar_provider? }
+ */
+async function checkCalendarAvailability(userId, toolInput) {
+  const url = process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK;
+  if (!url || !String(url).trim()) {
+    return JSON.stringify({
+      error: 'Calendar availability webhook not configured (set PIPEDREAM_CALENDAR_QUERY_WEBHOOK)',
+      available: false,
+    });
+  }
+
+  const start_time = String(toolInput?.start_time ?? '').trim();
+  const end_time = String(toolInput?.end_time ?? '').trim();
+  const intent = String(toolInput?.intent ?? '').trim();
+
+  if (!start_time || !end_time) {
+    return JSON.stringify({
+      error: 'start_time and end_time are required (ISO 8601)',
+      available: false,
+    });
+  }
+
+  const { rows } = await pool.query(
+    'SELECT short_id, client_id, calendar_provider FROM users WHERE id = $1',
+    [userId]
+  );
+  const userRow = rows[0] || {};
+  const clientId = userRow.short_id || userRow.client_id || null;
+  if (!clientId) {
+    return JSON.stringify({
+      error: 'client_id not found for user — complete onboarding first',
+      available: false,
+    });
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  const token =
+    process.env.PIPEDREAM_CALENDAR_QUERY_TOKEN ||
+    process.env.PIPEDREAM_CALENDAR_TOKEN ||
+    process.env.PIPEDREAM_ARCHITECTURE_PROFILE_TOKEN;
+  if (token != null && String(token).trim() !== '') {
+    headers.Authorization = `Bearer ${String(token).trim()}`;
+  }
+  const pdEnv = process.env.PIPEDREAM_ENVIRONMENT;
+  if (pdEnv != null && String(pdEnv).trim() !== '') {
+    headers['x-pd-environment'] = String(pdEnv).trim();
+  }
+
+  const body = {
+    client_id: clientId,
+    start_time,
+    end_time,
+    intent: intent || 'availability check',
+    calendar_provider: userRow.calendar_provider || null,
+  };
+
+  try {
+    const res = await fetch(String(url).trim(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.error('[CALENDAR] availability HTTP', res.status, text.slice(0, 500));
+      return JSON.stringify({
+        error: `HTTP ${res.status}`,
+        available: false,
+        body: text.length > 4000 ? `${text.slice(0, 4000)}…` : text,
+      });
+    }
+    let parsed;
+    try {
+      parsed = text ? JSON.parse(text) : { raw: text };
+    } catch {
+      parsed = { raw: text };
+    }
+    return JSON.stringify({
+      ok: true,
+      client_id: clientId,
+      start_time,
+      end_time,
+      intent: body.intent,
+      ...((typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) ? parsed : { data: parsed }),
+    });
+  } catch (err) {
+    console.error('[CALENDAR] availability failed:', err?.message || err);
+    return JSON.stringify({
+      error: err.message || String(err),
+      available: false,
+    });
+  }
 }
 
 /**
@@ -1156,8 +1319,10 @@ async function getAgentTools(userId, options = {}) {
   const subscriptionStatus = options.subscriptionStatus === 'PRO' ? 'PRO' : 'LITE';
   const archProfileTools = getArchitectureProfileAnthropicTools();
   const pipedreamCalendarTools = getPipedreamCalendarAnthropicTools();
+  const calendarAvailabilityTools = getCalendarAvailabilityAnthropicTools();
   const staticAnthropicTools = [
     ...archProfileTools,
+    ...calendarAvailabilityTools,
     ...pipedreamCalendarTools,
     SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
@@ -1502,6 +1667,8 @@ async function getHybridResponseFromMessages(
           let payload;
           if (tu.name === 'fetch_architecture_profile') {
             payload = await fetchArchitectureProfile(tu.input?.client_id);
+          } else if (tu.name === 'check_calendar_availability') {
+            payload = await checkCalendarAvailability(composioUserId, tu.input);
           } else if (tu.name === 'execute_pipedream_calendar_task') {
             payload = await executePipedreamCalendarTask(tu.input);
           } else if (tu.name === 'execute_action') {
@@ -1716,6 +1883,7 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const profilePrefs = userPreferences.profile || {};
   const calendarConnected = googleSuperActive || calProv !== 'N/A';
   const dateNightIntakeRequired = needsDateNightIntake(user);
+  const automationIntakePending = buildAutomationIntakePending(user);
 
   const dynamicContext = `
 ### LIVE USER CONTEXT
@@ -1733,6 +1901,7 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - Friction Points: ${profilePrefs.friction_points || 'N/A'}
 - Service Commitment: ${profilePrefs.service_commitment || 'N/A'}
 - Active Automations: ${formatAutomationSlugList(activeAutomationsList)}
+- automation_intake_pending: ${automationIntakePending}
 - Preferences: ${JSON.stringify(userPreferences)}
 - date_night_intake_required: ${dateNightIntakeRequired}
 - display_name: ${user.first_name || 'Client'}
@@ -1759,10 +1928,24 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const dateNightBlock = dateNightIntakeRequired
     ? `
 ### REQUIRED ACTION: DATE NIGHT INTAKE
-date_night_intake_required is true. Initiate Date Night preference collection now. After collecting neighborhood, budget, cuisines, and dietary restrictions, call save_date_night_preferences.
+date_night_intake_required is true. Run the date_night intake protocol from FLAGSHIP AUTOMATION FRAMEWORK, then call save_date_night_preferences.
 `
     : '';
-  const finalSystemPrompt = `${buildEliteTriageSystemPrompt()}\n\n${dynamicContext}${lockedOverrideBlock}${dateNightBlock}`;
+  const automationIntakeBlock =
+    automationIntakePending !== 'none' && !dateNightIntakeRequired
+      ? `
+### REQUIRED ACTION: AUTOMATION INTAKE
+automation_intake_pending: ${automationIntakePending}
+Run the matching FLAGSHIP AUTOMATION FRAMEWORK intake protocol before proposing execution.
+`
+      : '';
+  const calendarToolBlock = calendarConnected
+    ? `
+### CALENDAR TOOLS ACTIVE
+calendar_connected is true. You MUST call check_calendar_availability before proposing any specific date or time window.
+`
+    : '';
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt()}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,
