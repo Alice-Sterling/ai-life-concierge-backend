@@ -1129,7 +1129,10 @@ async function checkCalendarAvailability(userId, toolInput) {
     });
   }
 
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-pd-external-user-id': clientId,
+  };
   const token =
     process.env.PIPEDREAM_CALENDAR_QUERY_TOKEN ||
     process.env.PIPEDREAM_CALENDAR_TOKEN ||
