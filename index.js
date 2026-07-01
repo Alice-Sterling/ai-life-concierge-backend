@@ -1920,8 +1920,6 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
     subscriptionStatus,
     skipComposio: onboardingPending,
   });
-  const composioGoogleSuper = (toolbox.connections || []).some((c) => c.toolkitSlug === GOOGLE_SUPER_TOOLKIT);
-
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
 
