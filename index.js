@@ -184,6 +184,120 @@ function cleanTwilioSenderPhone(raw) {
   return String(raw).replace(/^whatsapp:/i, '').trim();
 }
 
+function getAirtableEnvPick(envKey, fallback) {
+  const v = process.env[envKey];
+  if (v != null && String(v).trim() !== '') return String(v).trim();
+  return fallback;
+}
+
+function getAirtablePhoneFieldName() {
+  return getAirtableEnvPick('AIRTABLE_PHONE_FIELD', 'phone_number');
+}
+
+/** Escape user values embedded in Airtable filterByFormula string literals. */
+function escapeAirtableFormulaString(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/** Postgres/Twilio phone → E.164-style string for Airtable single-line text (DB is source of truth). */
+function resolveCleanPhoneForAirtable(dbPhone, senderPhone) {
+  const fromDb = cleanTwilioSenderPhone(dbPhone);
+  const fromSender = cleanTwilioSenderPhone(senderPhone);
+  return fromDb || fromSender;
+}
+
+async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
+  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
+  if (!apiKey || !baseId || !tableName) return null;
+
+  const phoneField = getAirtablePhoneFieldName();
+  const formulas = [];
+  if (clientId) {
+    formulas.push(`{Client ID}='${escapeAirtableFormulaString(clientId)}'`);
+  }
+  if (cleanPhone) {
+    formulas.push(`{${phoneField}}='${escapeAirtableFormulaString(cleanPhone)}'`);
+  }
+
+  for (const formula of formulas) {
+    const searchUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+    const searchRes = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const text = await searchRes.text();
+    let searchData;
+    try {
+      searchData = text ? JSON.parse(text) : {};
+    } catch {
+      console.error('[AIRTABLE] lookup JSON parse error:', text.slice(0, 300));
+      continue;
+    }
+    if (!searchRes.ok) {
+      console.error('[AIRTABLE] lookup HTTP', searchRes.status, formula, text.slice(0, 500));
+      continue;
+    }
+    if (searchData.records?.length > 0) {
+      return searchData.records[0].id;
+    }
+  }
+  return null;
+}
+
+async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AIRTABLE' }) {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
+  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
+  if (!apiKey || !baseId || !tableName) return false;
+
+  const phoneField = getAirtablePhoneFieldName();
+  console.log(`[${logTag}] upsert`, {
+    phoneField,
+    cleanPhone: cleanPhone || '(empty)',
+    clientId: clientId || '(empty)',
+    fieldKeys: Object.keys(fields),
+    phoneValue: fields[phoneField],
+  });
+
+  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone });
+  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}`;
+
+  if (recordId) {
+    const patchRes = await fetch(`${baseUrl}/${recordId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ fields }),
+    });
+    const patchText = await patchRes.text();
+    if (!patchRes.ok) {
+      console.error(`[${logTag}] PATCH HTTP`, patchRes.status, patchText.slice(0, 800));
+      return false;
+    }
+    console.log(`[${logTag}] record updated`, recordId);
+    return true;
+  }
+
+  const createRes = await fetch(baseUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ records: [{ fields }] }),
+  });
+  const createText = await createRes.text();
+  if (!createRes.ok) {
+    console.error(`[${logTag}] POST HTTP`, createRes.status, createText.slice(0, 800));
+    return false;
+  }
+  console.log(`[${logTag}] record created`);
+  return true;
+}
+
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
 Role: Lead Triage Architect for Ai Life Concierge (ALC).
 Persona: Elite Chief of Staff. Sophisticated, radically proactive, and value-driven. You are **Alice** (the Sovereign Architect) — this Master System Prompt overrides conflicting defaults.
@@ -677,16 +791,15 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
   );
   const userRow = rows[0] || {};
   const clientIdForAirtable = userRow.short_id || userRow.client_id || null;
-  const cleanPhoneNumber =
-    cleanTwilioSenderPhone(senderPhoneNumber) || cleanTwilioSenderPhone(userRow.phone_number);
+  const cleanPhoneNumber = resolveCleanPhoneForAirtable(userRow.phone_number, senderPhoneNumber);
 
-  if (cleanPhoneNumber) {
+  if (cleanPhoneNumber && senderPhoneNumber) {
+    const twilioPhone = String(senderPhoneNumber).trim().startsWith('whatsapp:')
+      ? String(senderPhoneNumber).trim()
+      : `whatsapp:${cleanPhoneNumber}`;
     await pool.query(
-      `UPDATE users SET phone_number = $1 WHERE id = $2 AND (phone_number IS NULL OR phone_number = '')`,
-      [senderPhoneNumber != null && String(senderPhoneNumber).includes('whatsapp:')
-        ? String(senderPhoneNumber).trim()
-        : `whatsapp:${cleanPhoneNumber}`,
-        userId]
+      `UPDATE users SET phone_number = COALESCE(NULLIF(phone_number, ''), $1) WHERE id = $2`,
+      [twilioPhone, userId]
     );
   }
 
@@ -719,9 +832,10 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
     process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
   if (airtableKey && airtableBaseId && airtableTableName) {
     try {
+      const phoneFieldName = getAirtablePhoneFieldName();
       const airtableFields = {
         'Client ID': clientIdForAirtable,
-        phone_number: cleanPhoneNumber,
+        [phoneFieldName]: cleanPhoneNumber,
         Occupation: occupation,
         'Friction Points': friction_points,
         'Service Commitment': service_commitment,
@@ -729,56 +843,18 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
         Preferences: JSON.stringify(preferences || {}),
       };
 
-      if (cleanPhoneNumber) {
-        const formula = `{phone_number}='${cleanPhoneNumber}'`;
-        const searchUrl = `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}?filterByFormula=${encodeURIComponent(formula)}`;
-        const searchRes = await fetch(searchUrl, {
-          headers: { Authorization: `Bearer ${airtableKey}` },
+      if (!cleanPhoneNumber) {
+        console.warn('[ONBOARDING] Skipping Airtable upsert: missing phone_number', {
+          userId,
+          dbPhone: userRow.phone_number,
+          senderPhone: senderPhoneNumber,
         });
-
-        if (!searchRes.ok) {
-          const text = await searchRes.text();
-          console.error('[ONBOARDING] Airtable lookup HTTP', searchRes.status, text.slice(0, 500));
-        } else {
-          const searchData = await searchRes.json();
-
-          if (searchData.records && searchData.records.length > 0) {
-            const recordId = searchData.records[0].id;
-            const patchUrl = `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}/${recordId}`;
-            const patchRes = await fetch(patchUrl, {
-              method: 'PATCH',
-              headers: {
-                Authorization: `Bearer ${airtableKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ fields: airtableFields }),
-            });
-            if (!patchRes.ok) {
-              const text = await patchRes.text();
-              console.error('[ONBOARDING] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
-            } else {
-              console.log('[ONBOARDING] Airtable record updated successfully.');
-            }
-          } else {
-            const createUrl = `https://api.airtable.com/v0/${encodeURIComponent(airtableBaseId)}/${encodeURIComponent(airtableTableName)}`;
-            const createRes = await fetch(createUrl, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${airtableKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ records: [{ fields: airtableFields }] }),
-            });
-            if (!createRes.ok) {
-              const text = await createRes.text();
-              console.error('[ONBOARDING] Airtable POST HTTP', createRes.status, text.slice(0, 500));
-            } else {
-              console.log('[ONBOARDING] Airtable record created successfully.');
-            }
-          }
-        }
       } else {
-        console.warn('[ONBOARDING] Skipping Airtable upsert: missing phone_number');
+        await upsertAirtableRecord(airtableFields, {
+          clientId: clientIdForAirtable,
+          cleanPhone: cleanPhoneNumber,
+          logTag: 'ONBOARDING',
+        });
       }
     } catch (err) {
       console.error('[ONBOARDING] Airtable sync failed:', err?.message || err);
@@ -845,22 +921,12 @@ async function saveDateNightPreferences(userId, toolInput) {
 
   if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_NAME && user.phone_number) {
     try {
-      // Step 1: Clean the phone number and GET the Airtable Record ID
-      const cleanPhoneNumber = user.phone_number.replace('whatsapp:', '');
-      const formula = `{phone_number}='${cleanPhoneNumber}'`;
-      const searchUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_NAME}?filterByFormula=${encodeURIComponent(formula)}`;
+      const cleanPhoneNumber = resolveCleanPhoneForAirtable(user.phone_number, null);
+      const recordId = await findAirtableRecordIdByClientOrPhone({ clientId: null, cleanPhone: cleanPhoneNumber });
 
-      const searchRes = await fetch(searchUrl, {
-        headers: { Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}` },
-      });
-      const searchData = await searchRes.json();
-
-      if (searchData.records && searchData.records.length > 0) {
-        const recordId = searchData.records[0].id;
-
-        // Step 2: PATCH the specific record with the new Preferences JSON
-        const patchUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_NAME}/${recordId}`;
-        await fetch(patchUrl, {
+      if (recordId) {
+        const patchUrl = `https://api.airtable.com/v0/${encodeURIComponent(process.env.AIRTABLE_BASE_ID)}/${encodeURIComponent(process.env.AIRTABLE_TABLE_NAME)}/${recordId}`;
+        const patchRes = await fetch(patchUrl, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}`,
@@ -872,7 +938,12 @@ async function saveDateNightPreferences(userId, toolInput) {
             },
           }),
         });
-        console.log('Airtable preferences updated successfully.');
+        if (!patchRes.ok) {
+          const text = await patchRes.text();
+          console.error('[DATE_NIGHT] Airtable PATCH HTTP', patchRes.status, text.slice(0, 500));
+        } else {
+          console.log('Airtable preferences updated successfully.');
+        }
       } else {
         console.log('Airtable record not found for phone number:', user.phone_number);
       }
@@ -1033,19 +1104,14 @@ function getAirtableTableRef() {
 
 /** Airtable field names — set AIRTABLE_*_FIELD in Railway to match your base exactly. */
 function buildAirtableRecordFields({ client_id, phone_number, email, tier, last_message }) {
-  const pick = (envKey, fallback) => {
-    const v = process.env[envKey];
-    if (v != null && String(v).trim() !== '') return String(v).trim();
-    return fallback;
-  };
-  const phoneColumn = pick('AIRTABLE_PHONE_FIELD', 'phone_number');
-  const emailField = pick('AIRTABLE_EMAIL_FIELD', 'Email');
-  const tierField = pick('AIRTABLE_TIER_FIELD', 'Tier');
-  const lastMsgField = pick('AIRTABLE_LAST_MESSAGE_FIELD', 'Last Message');
+  const phoneColumn = getAirtablePhoneFieldName();
+  const emailField = getAirtableEnvPick('AIRTABLE_EMAIL_FIELD', 'Email');
+  const tierField = getAirtableEnvPick('AIRTABLE_TIER_FIELD', 'Tier');
+  const lastMsgField = getAirtableEnvPick('AIRTABLE_LAST_MESSAGE_FIELD', 'Last Message');
 
   return {
     'Client ID': client_id ?? '',
-    [phoneColumn]: phone_number ?? '',
+    [phoneColumn]: resolveCleanPhoneForAirtable(phone_number, null) || (phone_number ?? ''),
     [emailField]: email ?? '',
     [tierField]: tier ?? '',
     [lastMsgField]: last_message ?? '',
@@ -1727,7 +1793,9 @@ app.post('/webhook', async (req, res) => {
     console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
     console.log('Status: Running Agentic Concierge...');
     console.log('[CRITICAL] Waiting for AI response...');
-    const aiText = await runAgenticConcierge(user, incomingText, { senderPhoneNumber: phoneNumber });
+    const aiText = await runAgenticConcierge(user, incomingText, {
+      senderPhoneNumber: phoneNumber || user.phone_number,
+    });
     console.log('[CRITICAL] AI response received: ', aiText);
 
     const replyBody =
