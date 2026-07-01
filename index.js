@@ -613,13 +613,22 @@ You have access to the user's LIVE STATE via the context block provided by the s
 - Lite Phase: If the 180-day founding_member_180_window is false and subscription_status is not PRO, downgrade to research-only mode. Inform the user: "Autonomous layer expired. Upgrade to reactivate execution."
 
 2. CALENDAR PROTOCOL & OPPORTUNITY SCANNING
-If LIVE USER CONTEXT shows Calendar Connected: True, you are a temporal architect. You CANNOT infer availability from text alone.
-- Mandatory Tool: Before proposing ANY specific date, time, reservation window, or itinerary slot, you MUST call check_calendar_availability with ISO 8601 start_time and end_time covering the proposed window, plus intent (e.g. "date night proposal").
-- Wait for the tool result. Only propose times that fall within returned free/busy gaps. Never propose slots that overlap busy periods.
-- Contextual Awareness: If the user says "next weekend", calculate exact dates from Current System Time, then call check_calendar_availability for that range before suggesting options.
-- Use execute_pipedream_calendar_task only for explicit calendar writes (create_event) after availability is confirmed. Never use Composio execute_action for calendar reads or writes. OAuth is web-only via calendar_onboarding_link.
+If LIVE USER CONTEXT shows Calendar Connected: True, the user's calendar OAuth is complete. You are a temporal architect.
+- Mandatory Tool: Before proposing ANY specific date, time, or reservation window, call check_calendar_availability with ISO 8601 start_time, end_time, and intent.
+- If the tool returns free/busy data, only propose slots in free gaps.
+- If check_calendar_availability returns tool_unavailable or webhook_not_configured: do NOT escalate to the human desk. Do NOT claim a "backend sync error" or permission problem. Continue with vault curation and ask the user to confirm the evening is free. You may retry the tool once.
+- If Calendar Connected is False, send the calendar_onboarding_link — never claim you can read their calendar.
+- Use execute_pipedream_calendar_task only for create_event after the user confirms a slot.
 
-3. THE SECURE HANDSHAKE (SYNC PROTOCOL)
+5. REQUEST QUALIFICATION & FALLBACK
+Do NOT trigger Human Fallback for:
+- Active flagship automations (date_night, gifting, travel_logistics) — these are structured workflows, not ad-hoc requests.
+- check_calendar_availability errors, timeouts, or missing webhook — continue with recommendations and user confirmation.
+- Date night venue curation (area, budget, cuisine, date) — execute the automation; do not count intake fields as "5+ variables".
+
+Human Fallback ONLY when: an ad-hoc bespoke request (not covered by an active automation) requires physical human presence beyond digital booking AND cannot be resolved with vault search + verified links.
+
+Fallback copy: "This request requires a human execution layer. Staging hand-off to the concierge desk now — assist@ailifeconcierge.co.uk"
 When a user provides the activation phrase: "I've now connected my calendar and enabled my automations - please sync systems to activate."
 - Read LIVE USER CONTEXT (already updated by the backend). Do not call fetch_architecture_profile unless architecture_synced_at is N/A and calendar_provider is missing.
 - Acknowledge: "Logic staged. I have identified your [Google/Outlook] sync and initialized [Active Automations from context]. I am now engineering your first outcome."
@@ -630,12 +639,7 @@ For every physical request (flowers, dining, services):
 - Verify Coverage: Scan business websites for "RH6", "Horley", or "Surrey".
 - Availability: Cross-reference operating hours against the user's connected calendar when scheduling.
 
-5. REQUEST QUALIFICATION & FALLBACK
-Constraint Check: If a request has 5+ variables or requires physical presence beyond digital booking, trigger Human Fallback.
-Fallback Routing: End with handover to assist@ailifeconcierge.co.uk.
-Logic: "This request requires a human execution layer. Staging hand-off to the concierge desk now."
-
-### CALENDAR VAULT LINK (web OAuth only)
+3. THE SECURE HANDSHAKE (SYNC PROTOCOL)
 When the user must connect their calendar, respond with exactly (substitute calendar_onboarding_link from LIVE USER CONTEXT for [LINK]):
 I've prepared your secure vault access. Please complete the handshake here to sync your calendar: [LINK]
 
@@ -1045,27 +1049,33 @@ function getCalendarAvailabilityAnthropicTools() {
   return [CHECK_CALENDAR_AVAILABILITY_ANTHROPIC_TOOL];
 }
 
+async function refreshCalendarProviderFromAirtableIfMissing(user) {
+  if (isCalendarConnected(user)) return user;
+  const clientId = user?.short_id || user?.client_id;
+  if (!clientId) return user;
+  const sync = await syncCalendarFromAirtableForUser(user.id, clientId);
+  if (sync?.calendarProvider) {
+    user.calendar_provider = sync.calendarProvider;
+    user.architecture_synced_at = new Date();
+    console.log('[SYNC] auto-refreshed calendar_provider from Airtable:', sync.calendarProvider);
+  }
+  return user;
+}
+
 /**
  * POST free/busy query to Pipedream. Set PIPEDREAM_CALENDAR_QUERY_WEBHOOK.
- * Body: { client_id, start_time, end_time, intent, calendar_provider? }
+ * Falls back to PIPEDREAM_CALENDAR_URL read_calendar when query webhook is unset.
  */
 async function checkCalendarAvailability(userId, toolInput) {
-  const url = process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK;
-  if (!url || !String(url).trim()) {
-    return JSON.stringify({
-      error: 'Calendar availability webhook not configured (set PIPEDREAM_CALENDAR_QUERY_WEBHOOK)',
-      available: false,
-    });
-  }
-
   const start_time = String(toolInput?.start_time ?? '').trim();
   const end_time = String(toolInput?.end_time ?? '').trim();
   const intent = String(toolInput?.intent ?? '').trim();
 
   if (!start_time || !end_time) {
     return JSON.stringify({
+      ok: false,
+      status: 'invalid_input',
       error: 'start_time and end_time are required (ISO 8601)',
-      available: false,
     });
   }
 
@@ -1077,8 +1087,43 @@ async function checkCalendarAvailability(userId, toolInput) {
   const clientId = userRow.short_id || userRow.client_id || null;
   if (!clientId) {
     return JSON.stringify({
-      error: 'client_id not found for user — complete onboarding first',
-      available: false,
+      ok: false,
+      status: 'no_client_id',
+      error: 'client_id not found — complete onboarding first',
+    });
+  }
+
+  const calendarProvider = normalizeCalendarProviderValue(userRow.calendar_provider);
+  const queryUrl = process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK;
+
+  if (!queryUrl || !String(queryUrl).trim()) {
+    const fallbackCalendarUrl =
+      process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL;
+    if (fallbackCalendarUrl && String(fallbackCalendarUrl).trim()) {
+      console.log('[CALENDAR] query webhook unset; falling back to read_calendar');
+      const payload = await executePipedreamCalendarTask({
+        client_id: clientId,
+        action: 'read_calendar',
+        details: `Free/busy availability check from ${start_time} to ${end_time}. Intent: ${intent || 'availability check'}. CalendarProvider: ${calendarProvider || 'google'}`,
+      });
+      return JSON.stringify({
+        ok: true,
+        status: 'fallback_read_calendar',
+        start_time,
+        end_time,
+        intent: intent || 'availability check',
+        data: payload,
+      });
+    }
+    return JSON.stringify({
+      ok: false,
+      status: 'tool_unavailable',
+      calendar_connected: Boolean(calendarProvider),
+      message:
+        'Availability webhook not configured. Do not escalate to human desk. Curate from vault and ask the user to confirm the proposed evening is free.',
+      start_time,
+      end_time,
+      intent: intent || 'availability check',
     });
   }
 
@@ -1104,7 +1149,7 @@ async function checkCalendarAvailability(userId, toolInput) {
   };
 
   try {
-    const res = await fetch(String(url).trim(), {
+    const res = await fetch(String(queryUrl).trim(), {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -1114,9 +1159,12 @@ async function checkCalendarAvailability(userId, toolInput) {
     if (!res.ok) {
       console.error('[CALENDAR] availability HTTP', res.status, text.slice(0, 500));
       return JSON.stringify({
-        error: `HTTP ${res.status}`,
-        available: false,
-        body: text.length > 4000 ? `${text.slice(0, 4000)}…` : text,
+        ok: false,
+        status: 'http_error',
+        http_status: res.status,
+        message:
+          'Calendar query failed. Do not escalate to human desk. Curate from vault and ask the user to confirm availability.',
+        body: text.length > 2000 ? `${text.slice(0, 2000)}…` : text,
       });
     }
     let parsed;
@@ -1136,8 +1184,11 @@ async function checkCalendarAvailability(userId, toolInput) {
   } catch (err) {
     console.error('[CALENDAR] availability failed:', err?.message || err);
     return JSON.stringify({
+      ok: false,
+      status: 'request_failed',
+      message:
+        'Calendar query timed out. Do not escalate to human desk. Curate from vault and ask the user to confirm availability.',
       error: err.message || String(err),
-      available: false,
     });
   }
 }
@@ -1943,6 +1994,12 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 
   const calendarProviderNorm = normalizeCalendarProviderValue(user.calendar_provider);
   const isConnected = calendarProviderNorm === 'google' || calendarProviderNorm === 'outlook';
+  const calendarQueryWebhookConfigured = Boolean(
+    process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK && String(process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK).trim()
+  );
+  const calendarReadFallbackConfigured = Boolean(
+    (process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL || '').trim()
+  );
   const archAt =
     user.architecture_synced_at != null
       ? new Date(user.architecture_synced_at).toISOString()
@@ -1982,6 +2039,8 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - date_night_intake_required: ${dateNightIntakeRequired}
 - Calendar Provider: ${calendarProviderNorm || 'None'}
 - Calendar Connected: ${isConnected ? 'True' : 'False'}
+- calendar_query_webhook_configured: ${calendarQueryWebhookConfigured}
+- calendar_read_fallback_configured: ${calendarReadFallbackConfigured}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
@@ -2178,6 +2237,10 @@ app.post('/webhook', async (req, res) => {
     if (!airtableLeadOk) {
       console.warn('[AIRTABLE_LEAD] sync skipped or failed');
     }
+
+    await refreshCalendarProviderFromAirtableIfMissing(user);
+    const refreshedCal = await getUserByPhone(phoneNumber);
+    if (refreshedCal) user = refreshedCal;
 
     const incomingText = String(req.body.Body || '').trim();
 
