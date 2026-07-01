@@ -277,7 +277,12 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
       console.error(`[${logTag}] PATCH HTTP`, patchRes.status, patchText.slice(0, 800));
       return false;
     }
-    console.log(`[${logTag}] record updated`, recordId);
+    try {
+      const patched = patchText ? JSON.parse(patchText) : {};
+      console.log(`[${logTag}] record updated`, recordId, patched.fields || {});
+    } catch {
+      console.log(`[${logTag}] record updated`, recordId);
+    }
     return true;
   }
 
@@ -295,7 +300,62 @@ async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AI
     return false;
   }
   console.log(`[${logTag}] record created`);
+  try {
+    const created = createText ? JSON.parse(createText) : {};
+    const savedFields = created.records?.[0]?.fields;
+    if (savedFields) {
+      console.log(`[${logTag}] saved fields`, savedFields);
+    }
+  } catch {
+    /* ignore parse */
+  }
   return true;
+}
+
+/**
+ * Early Airtable anchor: Client ID + phone on first contact (before onboarding completes).
+ * Upserts on every pending-onboarding message so partial setups still have a traceable row.
+ */
+async function seedAirtableLeadRecord(user, senderPhoneNumber) {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
+  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
+  if (!apiKey || !baseId || !tableName) {
+    console.warn('[AIRTABLE_LEAD] skipped: missing AIRTABLE_API_KEY, AIRTABLE_BASE_ID, or AIRTABLE_TABLE_NAME');
+    return false;
+  }
+
+  const clientId = user?.short_id || user?.client_id || null;
+  const cleanPhone = resolveCleanPhoneForAirtable(user?.phone_number, senderPhoneNumber);
+
+  if (!cleanPhone) {
+    console.warn('[AIRTABLE_LEAD] skipped: could not resolve phone', {
+      userId: user?.id,
+      dbPhone: user?.phone_number,
+      sender: senderPhoneNumber,
+    });
+    return false;
+  }
+
+  const phoneFieldName = getAirtablePhoneFieldName();
+  const fields = {
+    'Client ID': clientId || '',
+    [phoneFieldName]: cleanPhone,
+  };
+
+  return upsertAirtableRecord(fields, {
+    clientId,
+    cleanPhone,
+    logTag: 'AIRTABLE_LEAD',
+  });
+}
+
+function isOnboardingPending(user) {
+  const status =
+    user?.onboarding_status != null && String(user.onboarding_status).trim() !== ''
+      ? String(user.onboarding_status).trim()
+      : 'pending';
+  return status === 'pending';
 }
 
 const ELITE_TRIAGE_SYSTEM_PROMPT = `
@@ -1493,11 +1553,10 @@ async function search_vault_and_web(query, { skipTavily = false } = {}) {
   if (!skipTavily && tavilyClient && qText.length > 0) {
     try {
       const tavilyQuery = String(qText);
-      const result = await tavilyClient.search({
-        query: tavilyQuery,
-        max_results: 5,
-        include_answer: false,
-        include_images: false,
+      const result = await tavilyClient.search(tavilyQuery, {
+        maxResults: 5,
+        includeAnswer: false,
+        includeImages: false,
       });
       web = Array.isArray(result?.results) ? result.results : [];
     } catch (err) {
@@ -1712,10 +1771,12 @@ app.post('/webhook', async (req, res) => {
     const profileName = req.body.ProfileName || req.body.profileName || null;
 
     let user = await getUserByPhone(phoneNumber);
+    let isNewUser = false;
 
     if (!user) {
       console.log('Status: New user detected. Creating Explorer profile...');
       user = await createNewUser(phoneNumber, profileName);
+      isNewUser = true;
     } else if (!user.first_name && profileName) {
       await pool.query('UPDATE users SET first_name = $1 WHERE id = $2', [profileName, user.id]);
       user.first_name = profileName;
@@ -1729,7 +1790,15 @@ app.post('/webhook', async (req, res) => {
       const sid = await ensureShortIdForUser(user.id);
       if (sid) user.short_id = sid;
     }
+    if (!user.phone_number && phoneNumber) {
+      user.phone_number = phoneNumber;
+    }
     console.log('Status: User identified as:', user.tier);
+
+    // Anchor Client ID + phone in Airtable immediately (partial onboarding still captured)
+    if (isNewUser || isOnboardingPending(user)) {
+      await seedAirtableLeadRecord(user, phoneNumber);
+    }
 
     const incomingText = String(req.body.Body || '').trim();
 
@@ -1790,8 +1859,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     // 3. Agentic Concierge — single TwiML response only after await completes (no res.send before this)
-    console.log('[FLOW] Bypassing Airtable to run Agentic Concierge');
-    console.log('Status: Running Agentic Concierge...');
+    console.log('[FLOW] Running Agentic Concierge...');
     console.log('[CRITICAL] Waiting for AI response...');
     const aiText = await runAgenticConcierge(user, incomingText, {
       senderPhoneNumber: phoneNumber || user.phone_number,
@@ -1814,9 +1882,6 @@ app.post('/webhook', async (req, res) => {
 
     // SAVE TO MEMORY
     await saveConversation(user.id, incomingText, replyBody);
-
-    // DISABLED: Airtable sync — re-enable when core bot + field mapping are stable
-    // void syncToAirtable({ ... }).catch(...);
 
     // 5. Twilio Response (only after aiResponse is fully resolved — must follow await above)
     console.log('Status: Sending TwiML back to Twilio...');
