@@ -191,7 +191,143 @@ function getAirtableEnvPick(envKey, fallback) {
 }
 
 function getAirtablePhoneFieldName() {
-  return getAirtableEnvPick('AIRTABLE_PHONE_FIELD', 'phone_number');
+  return resolvedAirtablePhoneFieldName || getAirtableEnvPick('AIRTABLE_PHONE_FIELD', 'phone_number');
+}
+
+/** Table name (e.g. Users) or table id (tbl…); AIRTABLE_TABLE_NAME takes precedence over AIRTABLE_USER_TABLE_ID. */
+function getAirtableTableRef() {
+  const byName = process.env.AIRTABLE_TABLE_NAME;
+  if (byName != null && String(byName).trim() !== '') return String(byName).trim();
+  const byId = process.env.AIRTABLE_USER_TABLE_ID;
+  if (byId != null && String(byId).trim() !== '') return String(byId).trim();
+  return null;
+}
+
+function getAirtableConfig() {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
+  const tableRef = getAirtableTableRef();
+  if (!apiKey || !baseId || !tableRef) return null;
+  return { apiKey, baseId, tableRef };
+}
+
+let resolvedAirtablePhoneFieldName = null;
+
+const AIRTABLE_PHONE_FIELD_FALLBACKS = [
+  'phone_number',
+  'Phone Number',
+  'Phone number',
+  'phone',
+  'Phone',
+  'Mobile',
+  'WhatsApp',
+];
+
+function airtablePhoneFieldCandidates() {
+  const fromEnv = getAirtableEnvPick('AIRTABLE_PHONE_FIELD', '');
+  const seen = new Set();
+  const out = [];
+  for (const c of [fromEnv, ...AIRTABLE_PHONE_FIELD_FALLBACKS]) {
+    if (c && !seen.has(c)) {
+      seen.add(c);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+async function discoverAirtablePhoneFieldName() {
+  if (resolvedAirtablePhoneFieldName) return resolvedAirtablePhoneFieldName;
+
+  const cfg = getAirtableConfig();
+  if (!cfg) {
+    resolvedAirtablePhoneFieldName = getAirtableEnvPick('AIRTABLE_PHONE_FIELD', 'phone_number');
+    return resolvedAirtablePhoneFieldName;
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(cfg.baseId)}/tables`,
+      { headers: { Authorization: `Bearer ${cfg.apiKey}` } }
+    );
+    const text = await res.text();
+    if (res.ok) {
+      const data = text ? JSON.parse(text) : {};
+      const table = (data.tables || []).find((t) => t.name === cfg.tableRef || t.id === cfg.tableRef);
+      if (table?.fields?.length) {
+        const envPreferred = getAirtableEnvPick('AIRTABLE_PHONE_FIELD', '');
+        if (envPreferred) {
+          const exact = table.fields.find((f) => f.name === envPreferred);
+          if (exact) {
+            resolvedAirtablePhoneFieldName = exact.name;
+            console.log('[AIRTABLE] phone field (env):', exact.name, exact.type);
+            return resolvedAirtablePhoneFieldName;
+          }
+        }
+        const phoneLike = table.fields.find(
+          (f) => f.type === 'phoneNumber' || /phone|mobile|whatsapp/i.test(f.name)
+        );
+        if (phoneLike) {
+          resolvedAirtablePhoneFieldName = phoneLike.name;
+          console.log('[AIRTABLE] phone field (discovered):', phoneLike.name, phoneLike.type);
+          return resolvedAirtablePhoneFieldName;
+        }
+        console.warn(
+          '[AIRTABLE] no phone-like column in table',
+          cfg.tableRef,
+          'columns:',
+          table.fields.map((f) => f.name).join(', ')
+        );
+      }
+    } else {
+      console.warn('[AIRTABLE] schema meta HTTP', res.status, text.slice(0, 400));
+    }
+  } catch (err) {
+    console.warn('[AIRTABLE] schema discovery failed:', err?.message || err);
+  }
+
+  resolvedAirtablePhoneFieldName = getAirtableEnvPick('AIRTABLE_PHONE_FIELD', 'phone_number');
+  return resolvedAirtablePhoneFieldName;
+}
+
+async function resolveAirtablePhoneFieldName() {
+  return discoverAirtablePhoneFieldName();
+}
+
+function remapAirtableFieldsToPhoneColumn(fields, phoneFieldName, cleanPhone) {
+  const out = { ...fields };
+  for (const key of airtablePhoneFieldCandidates()) {
+    if (key !== phoneFieldName && Object.prototype.hasOwnProperty.call(out, key)) {
+      delete out[key];
+    }
+  }
+  if (cleanPhone) {
+    out[phoneFieldName] = cleanPhone;
+  }
+  return out;
+}
+
+function parseAirtableUnknownFieldName(errorText) {
+  try {
+    const data = JSON.parse(errorText);
+    const msg = data?.error?.message || '';
+    const m = msg.match(/Unknown field name: "([^"]+)"/i);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function logAirtablePhoneVerification(logTag, phoneField, savedFields) {
+  if (!savedFields || typeof savedFields !== 'object') return;
+  const phoneVal = savedFields[phoneField];
+  if (phoneVal != null && String(phoneVal).trim() !== '') {
+    console.log(`[${logTag}] phone verified in Airtable:`, phoneVal);
+    return;
+  }
+  console.error(`[${logTag}] PHONE NOT SAVED — column "${phoneField}" empty/missing after write`, {
+    returnedColumns: Object.keys(savedFields),
+  });
 }
 
 /** Escape user values embedded in Airtable filterByFormula string literals. */
@@ -207,12 +343,10 @@ function resolveCleanPhoneForAirtable(dbPhone, senderPhone) {
 }
 
 async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
-  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
-  if (!apiKey || !baseId || !tableName) return null;
+  const cfg = getAirtableConfig();
+  if (!cfg) return null;
 
-  const phoneField = getAirtablePhoneFieldName();
+  const phoneField = await resolveAirtablePhoneFieldName();
   const formulas = [];
   if (clientId) {
     formulas.push(`{Client ID}='${escapeAirtableFormulaString(clientId)}'`);
@@ -222,9 +356,9 @@ async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
   }
 
   for (const formula of formulas) {
-    const searchUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+    const searchUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
     const searchRes = await fetch(searchUrl, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
     const text = await searchRes.text();
     let searchData;
@@ -246,82 +380,102 @@ async function findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone }) {
 }
 
 async function upsertAirtableRecord(fields, { clientId, cleanPhone, logTag = 'AIRTABLE' }) {
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
-  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
-  if (!apiKey || !baseId || !tableName) return false;
-
-  const phoneField = getAirtablePhoneFieldName();
-  console.log(`[${logTag}] upsert`, {
-    phoneField,
-    cleanPhone: cleanPhone || '(empty)',
-    clientId: clientId || '(empty)',
-    fieldKeys: Object.keys(fields),
-    phoneValue: fields[phoneField],
-  });
-
-  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone });
-  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}`;
-
-  if (recordId) {
-    const patchRes = await fetch(`${baseUrl}/${recordId}`, {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ fields }),
-    });
-    const patchText = await patchRes.text();
-    if (!patchRes.ok) {
-      console.error(`[${logTag}] PATCH HTTP`, patchRes.status, patchText.slice(0, 800));
-      return false;
-    }
-    try {
-      const patched = patchText ? JSON.parse(patchText) : {};
-      console.log(`[${logTag}] record updated`, recordId, patched.fields || {});
-    } catch {
-      console.log(`[${logTag}] record updated`, recordId);
-    }
-    return true;
-  }
-
-  const createRes = await fetch(baseUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ records: [{ fields }] }),
-  });
-  const createText = await createRes.text();
-  if (!createRes.ok) {
-    console.error(`[${logTag}] POST HTTP`, createRes.status, createText.slice(0, 800));
+  const cfg = getAirtableConfig();
+  if (!cfg) {
+    console.warn(`[${logTag}] skipped: missing AIRTABLE_API_KEY, AIRTABLE_BASE_ID, or table ref`);
     return false;
   }
-  console.log(`[${logTag}] record created`);
-  try {
-    const created = createText ? JSON.parse(createText) : {};
-    const savedFields = created.records?.[0]?.fields;
-    if (savedFields) {
-      console.log(`[${logTag}] saved fields`, savedFields);
+
+  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
+  const recordId = await findAirtableRecordIdByClientOrPhone({ clientId, cleanPhone });
+  const candidates = airtablePhoneFieldCandidates();
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const phoneField = candidates[i];
+    const attemptFields = remapAirtableFieldsToPhoneColumn(fields, phoneField, cleanPhone);
+
+    console.log(`[${logTag}] upsert attempt`, {
+      phoneField,
+      cleanPhone: cleanPhone || '(empty)',
+      clientId: clientId || '(empty)',
+      fieldKeys: Object.keys(attemptFields),
+      phoneValue: attemptFields[phoneField],
+      recordId: recordId || '(new)',
+    });
+
+    let responseText;
+    let responseOk;
+
+    if (recordId) {
+      const patchRes = await fetch(`${baseUrl}/${recordId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${cfg.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ fields: attemptFields, typecast: true }),
+      });
+      responseText = await patchRes.text();
+      responseOk = patchRes.ok;
+      if (responseOk) {
+        resolvedAirtablePhoneFieldName = phoneField;
+        try {
+          const patched = responseText ? JSON.parse(responseText) : {};
+          console.log(`[${logTag}] record updated`, recordId, patched.fields || {});
+          logAirtablePhoneVerification(logTag, phoneField, patched.fields);
+        } catch {
+          console.log(`[${logTag}] record updated`, recordId);
+        }
+        return true;
+      }
+      console.error(`[${logTag}] PATCH HTTP`, patchRes.status, responseText.slice(0, 800));
+    } else {
+      const createRes = await fetch(baseUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ records: [{ fields: attemptFields }], typecast: true }),
+      });
+      responseText = await createRes.text();
+      responseOk = createRes.ok;
+      if (responseOk) {
+        resolvedAirtablePhoneFieldName = phoneField;
+        console.log(`[${logTag}] record created`);
+        try {
+          const created = responseText ? JSON.parse(responseText) : {};
+          const savedFields = created.records?.[0]?.fields;
+          if (savedFields) {
+            console.log(`[${logTag}] saved fields`, savedFields);
+            logAirtablePhoneVerification(logTag, phoneField, savedFields);
+          }
+        } catch {
+          /* ignore parse */
+        }
+        return true;
+      }
+      console.error(`[${logTag}] POST HTTP`, createRes.status, responseText.slice(0, 800));
     }
-  } catch {
-    /* ignore parse */
+
+    const unknownField = parseAirtableUnknownFieldName(responseText);
+    if (unknownField && i < candidates.length - 1) {
+      console.warn(`[${logTag}] retrying after unknown field: ${unknownField}`);
+      continue;
+    }
+    return false;
   }
-  return true;
+
+  return false;
 }
 
 /**
- * Early Airtable anchor: Client ID + phone on first contact (before onboarding completes).
- * Upserts on every pending-onboarding message so partial setups still have a traceable row.
+ * Early Airtable anchor: Client ID + phone on every WhatsApp message (idempotent upsert).
  */
 async function seedAirtableLeadRecord(user, senderPhoneNumber) {
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
-  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
-  if (!apiKey || !baseId || !tableName) {
-    console.warn('[AIRTABLE_LEAD] skipped: missing AIRTABLE_API_KEY, AIRTABLE_BASE_ID, or AIRTABLE_TABLE_NAME');
+  const cfg = getAirtableConfig();
+  if (!cfg) {
+    console.warn('[AIRTABLE_LEAD] skipped: missing AIRTABLE_API_KEY, AIRTABLE_BASE_ID, or table ref');
     return false;
   }
 
@@ -337,7 +491,7 @@ async function seedAirtableLeadRecord(user, senderPhoneNumber) {
     return false;
   }
 
-  const phoneFieldName = getAirtablePhoneFieldName();
+  const phoneFieldName = await resolveAirtablePhoneFieldName();
   const fields = {
     'Client ID': clientId || '',
     [phoneFieldName]: cleanPhone,
@@ -355,17 +509,15 @@ async function fetchAirtableRecordFieldsByClientId(clientId) {
   const cid = String(clientId ?? '').trim();
   if (!cid) return null;
 
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  const baseId = getAirtableEnvPick('AIRTABLE_BASE_ID', '');
-  const tableName = getAirtableEnvPick('AIRTABLE_TABLE_NAME', '');
-  if (!apiKey || !baseId || !tableName) return null;
+  const cfg = getAirtableConfig();
+  if (!cfg) return null;
 
   const recordId = await findAirtableRecordIdByClientOrPhone({ clientId: cid, cleanPhone: null });
-  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}`;
+  const baseUrl = `https://api.airtable.com/v0/${encodeURIComponent(cfg.baseId)}/${encodeURIComponent(cfg.tableRef)}`;
 
   if (recordId) {
     const getRes = await fetch(`${baseUrl}/${recordId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
     const text = await getRes.text();
     if (!getRes.ok) {
@@ -382,7 +534,7 @@ async function fetchAirtableRecordFieldsByClientId(clientId) {
 
   const formula = `{Client ID}='${escapeAirtableFormulaString(cid)}'`;
   const searchUrl = `${baseUrl}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
-  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
   const searchText = await searchRes.text();
   if (!searchRes.ok) {
     console.error('[AIRTABLE] search HTTP', searchRes.status, searchText.slice(0, 500));
@@ -977,14 +1129,9 @@ async function saveOnboardingProfile(userId, toolInput, senderPhoneNumber = null
     }
   }
 
-  const airtableKey = process.env.AIRTABLE_API_KEY;
-  const airtableBaseId =
-    process.env.AIRTABLE_BASE_ID != null ? String(process.env.AIRTABLE_BASE_ID).trim() : '';
-  const airtableTableName =
-    process.env.AIRTABLE_TABLE_NAME != null ? String(process.env.AIRTABLE_TABLE_NAME).trim() : '';
-  if (airtableKey && airtableBaseId && airtableTableName) {
+  if (getAirtableConfig()) {
     try {
-      const phoneFieldName = getAirtablePhoneFieldName();
+      const phoneFieldName = await resolveAirtablePhoneFieldName();
       const airtableFields = {
         'Client ID': clientIdForAirtable,
         [phoneFieldName]: cleanPhoneNumber,
@@ -1244,15 +1391,6 @@ async function ensureClientIdForUser(userId) {
       // Likely unique violation; retry with a new ID
     }
   }
-  return null;
-}
-
-/** Table name (e.g. Users) or table id (tbl…); AIRTABLE_TABLE_NAME takes precedence over AIRTABLE_USER_TABLE_ID. */
-function getAirtableTableRef() {
-  const byName = process.env.AIRTABLE_TABLE_NAME;
-  if (byName != null && String(byName).trim() !== '') return String(byName).trim();
-  const byId = process.env.AIRTABLE_USER_TABLE_ID;
-  if (byId != null && String(byId).trim() !== '') return String(byId).trim();
   return null;
 }
 
@@ -1895,10 +2033,9 @@ app.post('/webhook', async (req, res) => {
     }
     console.log('Status: User identified as:', user.tier);
 
-    // Anchor Client ID + phone in Airtable immediately (partial onboarding still captured)
-    if (isNewUser || isOnboardingPending(user)) {
-      await seedAirtableLeadRecord(user, phoneNumber);
-    }
+    // Anchor Client ID + phone in Airtable on every message (idempotent)
+    const airtableLeadOk = await seedAirtableLeadRecord(user, phoneNumber);
+    console.log('[AIRTABLE_LEAD] result:', airtableLeadOk ? 'OK' : 'FAILED');
 
     const incomingText = String(req.body.Body || '').trim();
 
