@@ -192,8 +192,6 @@ function getSubscriptionStatusFromUser(user) {
       return inWindow ? 'FOUNDING_MEMBER' : 'LITE';
     }
   }
-  const { inWindow } = getFoundingMemberWindow(user);
-  if (inWindow) return 'FOUNDING_MEMBER';
   return 'LITE';
 }
 
@@ -300,20 +298,98 @@ function extractCalendarProviderFromAirtableFields(fields) {
 
 function parseAirtableDateValue(raw) {
   if (raw == null || String(raw).trim() === '') return null;
-  const d = raw instanceof Date ? raw : new Date(raw);
-  if (Number.isNaN(d.getTime())) return null;
-  return d;
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw;
+
+  const s = String(raw).trim();
+
+  // European DD/MM/YYYY or DD-MM-YYYY (Airtable Created At text exports)
+  const euDateTime = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (euDateTime) {
+    const day = Number(euDateTime[1]);
+    const month = Number(euDateTime[2]) - 1;
+    const year = Number(euDateTime[3]);
+    const hours = euDateTime[4] != null ? Number(euDateTime[4]) : 0;
+    const minutes = euDateTime[5] != null ? Number(euDateTime[5]) : 0;
+    const seconds = euDateTime[6] != null ? Number(euDateTime[6]) : 0;
+    const d = new Date(year, month, day, hours, minutes, seconds);
+    if (
+      !Number.isNaN(d.getTime()) &&
+      d.getFullYear() === year &&
+      d.getMonth() === month &&
+      d.getDate() === day
+    ) {
+      return d;
+    }
+  }
+
+  const iso = new Date(s);
+  if (!Number.isNaN(iso.getTime())) return iso;
+  return null;
 }
 
-function extractTrialStartDateFromAirtableFields(fields) {
+function airtableMultiSelectValues(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw.map((v) => String(v).trim()).filter(Boolean);
+  const s = String(raw).trim();
+  return s ? [s] : [];
+}
+
+function stripeStatusIncludes(values, label) {
+  const target = String(label).trim().toLowerCase();
+  return values.some((v) => {
+    const norm = String(v).trim().toLowerCase();
+    return norm === target || norm.includes(target);
+  });
+}
+
+function extractCreatedAtFromAirtableFields(fields) {
   if (!fields || typeof fields !== 'object') return null;
   const raw =
-    fields['Trial Start Date'] ??
-    fields.TrialStartDate ??
-    fields.trial_start_date ??
-    fields['Trial start date'] ??
+    fields['Created At'] ??
+    fields.CreatedAt ??
+    fields.created_at ??
     null;
   return parseAirtableDateValue(raw);
+}
+
+function extractStripeStatusFromAirtableFields(fields) {
+  if (!fields || typeof fields !== 'object') return [];
+  return airtableMultiSelectValues(fields['Stripe Status'] ?? fields.StripeStatus ?? fields.stripe_status);
+}
+
+function evaluateTrialMembershipFromAirtable({ trialStartDate, stripeStatusValues }) {
+  const hasTrialStarted = stripeStatusIncludes(stripeStatusValues, 'Trial Started');
+  const hasTrialEnded = stripeStatusIncludes(stripeStatusValues, 'Trial Ended');
+
+  let inWindow = false;
+  let daysSinceEnrollment = null;
+  if (trialStartDate) {
+    const en = trialStartDate instanceof Date ? trialStartDate : new Date(trialStartDate);
+    if (!Number.isNaN(en.getTime())) {
+      daysSinceEnrollment = Math.floor((Date.now() - en.getTime()) / (1000 * 60 * 60 * 24));
+      inWindow = daysSinceEnrollment >= 0 && daysSinceEnrollment <= 180;
+    }
+  }
+
+  if (hasTrialEnded || !inWindow || !hasTrialStarted) {
+    return {
+      membershipStatus: 'lite',
+      subscriptionStatus: 'LITE',
+      inWindow,
+      daysSinceEnrollment,
+      trialEnded: hasTrialEnded,
+      trialStarted: hasTrialStarted,
+    };
+  }
+
+  return {
+    membershipStatus: 'founding_member',
+    subscriptionStatus: 'FOUNDING_MEMBER',
+    inWindow,
+    daysSinceEnrollment,
+    trialEnded: false,
+    trialStarted: true,
+  };
 }
 
 async function findAirtableRecordsByClientId(clientId) {
@@ -546,7 +622,7 @@ async function fetchAirtableRecordFieldsByClientId(clientId) {
 }
 
 /**
- * Pull CalendarProvider, trial_start_date (+ optional phone) from Airtable by client_id; write to Postgres.
+ * Pull CalendarProvider (+ optional phone) from Airtable by client_id; write calendar_provider to Postgres.
  */
 async function syncCalendarFromAirtableForUser(userId, clientId) {
   const cid = String(clientId ?? '').trim();
@@ -557,7 +633,6 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
 
   const merged = mergeAirtableFieldsFromDuplicates(records);
   const calendarProvider = extractCalendarProviderFromAirtableFields(merged);
-  const trialStartDate = extractTrialStartDateFromAirtableFields(merged);
   const phoneField = getAirtablePhoneFieldName();
   const mergedPhone = merged[phoneField] ? cleanTwilioSenderPhone(merged[phoneField]) : null;
 
@@ -567,14 +642,6 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
       [calendarProvider, userId]
     );
     console.log('[SYNC] calendar_provider from Airtable:', calendarProvider, 'user:', userId);
-  }
-
-  if (trialStartDate) {
-    await pool.query(`UPDATE users SET trial_start_date = $1 WHERE id = $2::uuid`, [
-      trialStartDate,
-      userId,
-    ]);
-    console.log('[SYNC] trial_start_date from Airtable:', trialStartDate.toISOString(), 'user:', userId);
   }
 
   if (records.length > 1) {
@@ -594,10 +661,66 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
 
   return {
     calendarProvider,
-    trialStartDate,
     mergedPhone,
     duplicateCount: records.length,
     activeAutomations: merged.ActiveAutomations ?? merged.active_automations ?? null,
+  };
+}
+
+/**
+ * Sync trial_start_date from Airtable Created At and membership from Stripe Status multi-select.
+ */
+async function syncUserTrialStatus(userId, clientId) {
+  const cid = String(clientId ?? '').trim();
+  if (!cid) return null;
+
+  const records = await findAirtableRecordsByClientId(cid);
+  if (!records.length) return null;
+
+  const merged = mergeAirtableFieldsFromDuplicates(records);
+  const trialStartDate = extractCreatedAtFromAirtableFields(merged);
+  const stripeStatusValues = extractStripeStatusFromAirtableFields(merged);
+  const evaluation = evaluateTrialMembershipFromAirtable({ trialStartDate, stripeStatusValues });
+
+  if (trialStartDate) {
+    await pool.query(`UPDATE users SET trial_start_date = $1 WHERE id = $2::uuid`, [
+      trialStartDate,
+      userId,
+    ]);
+    console.log('[SYNC] trial_start_date from Airtable Created At:', trialStartDate.toISOString(), 'user:', userId);
+  }
+
+  const { rows } = await pool.query('SELECT subscription_status, preferences FROM users WHERE id = $1::uuid', [
+    userId,
+  ]);
+  const currentSub = String(rows[0]?.subscription_status || '').trim().toUpperCase();
+  if (currentSub !== 'PRO') {
+    await pool.query(`UPDATE users SET subscription_status = $1 WHERE id = $2::uuid`, [
+      evaluation.subscriptionStatus,
+      userId,
+    ]);
+  }
+
+  const prefs = parseUserJsonbObject(rows[0]?.preferences);
+  prefs.airtable_stripe_status = stripeStatusValues;
+  prefs.airtable_created_at = trialStartDate ? trialStartDate.toISOString() : null;
+  await pool.query(`UPDATE users SET preferences = $1::jsonb WHERE id = $2::uuid`, [
+    JSON.stringify(prefs),
+    userId,
+  ]);
+
+  console.log('[SYNC] trial membership:', evaluation.membershipStatus, {
+    userId,
+    stripeStatus: stripeStatusValues,
+    daysSinceEnrollment: evaluation.daysSinceEnrollment,
+    inWindow: evaluation.inWindow,
+    trialEnded: evaluation.trialEnded,
+  });
+
+  return {
+    trialStartDate,
+    stripeStatusValues,
+    ...evaluation,
   };
 }
 
@@ -970,8 +1093,8 @@ async function fetchArchitectureProfile(clientId) {
         airtableFields.calendar_provider ??
         airtableFields['Calendar Provider'] ??
         null,
-      TrialStartDate:
-        extractTrialStartDateFromAirtableFields(airtableFields)?.toISOString() ?? null,
+      TrialStartDate: extractCreatedAtFromAirtableFields(airtableFields)?.toISOString() ?? null,
+      StripeStatus: extractStripeStatusFromAirtableFields(airtableFields),
       ActiveAutomations: normalizeAutomationSlugs(
         airtableFields.ActiveAutomations ??
           airtableFields.active_automations ??
@@ -1135,9 +1258,12 @@ async function refreshAirtableProfileForUser(user) {
   const clientId = user?.short_id || user?.client_id;
   if (!clientId) return user;
   const sync = await syncCalendarFromAirtableForUser(user.id, clientId);
-  if (sync?.trialStartDate) {
-    user.trial_start_date = sync.trialStartDate;
-    console.log('[SYNC] auto-refreshed trial_start_date from Airtable:', sync.trialStartDate.toISOString());
+  const trialSync = await syncUserTrialStatus(user.id, clientId);
+  if (trialSync?.trialStartDate) {
+    user.trial_start_date = trialSync.trialStartDate;
+  }
+  if (trialSync?.subscriptionStatus && String(user.subscription_status || '').toUpperCase() !== 'PRO') {
+    user.subscription_status = trialSync.subscriptionStatus;
   }
   if (!isCalendarConnected(user) && sync?.calendarProvider) {
     user.calendar_provider = sync.calendarProvider;
@@ -2123,6 +2249,7 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
 - calendar_read_fallback_configured: ${calendarReadFallbackConfigured}
 - display_name: ${user.first_name || 'Client'}
 - trial_start_date: ${trialStart ? new Date(trialStart).toISOString() : 'N/A'}
+- stripe_status: ${JSON.stringify(userPreferences.airtable_stripe_status || [])}
 - current_day_of_trial: ${trialDay != null ? trialDay : 'N/A'}
 - days_since_enrollment: ${daysSinceEnrollment}
 - founding_member_180_window: ${foundingMember180Window}
@@ -2339,6 +2466,7 @@ app.post('/webhook', async (req, res) => {
       const onboardingId = user.short_id || user.client_id;
       if (onboardingId) {
         const airtableSync = await syncCalendarFromAirtableForUser(user.id, onboardingId);
+        await syncUserTrialStatus(user.id, onboardingId);
 
         const raw = await fetchArchitectureProfile(onboardingId);
         const persisted = await persistArchitectureSessionFromPipedreamResponse(user.id, raw, {
@@ -2383,6 +2511,7 @@ app.post('/webhook', async (req, res) => {
       console.log(`[VERIFICATION] Handshake detected for: ${phoneNumber}`);
       if (shortId) {
         await syncCalendarFromAirtableForUser(user.id, shortId);
+        await syncUserTrialStatus(user.id, shortId);
         await seedAirtableLeadRecord(user, phoneNumber);
         const refreshed = await getUserByPhone(phoneNumber);
         if (refreshed) user = refreshed;
