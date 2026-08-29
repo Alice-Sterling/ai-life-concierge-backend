@@ -2582,7 +2582,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-app.get('/portal', (req, res) => {
+app.get('/', (req, res) => {
   const waUrl =
     'https://wa.me/441483694296?text=' +
     encodeURIComponent(
