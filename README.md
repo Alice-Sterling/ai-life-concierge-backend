@@ -23,16 +23,40 @@ npm start
 
 ## Deploying
 
-**The code and the SQL must go out together.** `onboarding_phase` changed from a
-number to text, and the old number moved to `onboarding_step`. One without the
-other breaks onboarding for every user.
+The schema change is split in two so the rollout takes **zero downtime**. The
+two halves straddle the deploy:
 
-1. Back up the database
-2. Deploy the code
-3. Run `db/sql/001_mvp_schema_up.sql`
-4. Run `db/sql/002_verify.sql` — every row must say PASS
+```
+1. db/sql/001a_prepare.sql     <- safe while the OLD code is live
+2. deploy the code
+3. db/sql/001b_finalize.sql    <- safe while the NEW code is live
+4. db/sql/002_verify.sql       <- every row must say PASS
+```
 
-Undo: `db/sql/001_mvp_schema_down.sql` (destroys the new tables).
+**The order is not optional.** `onboarding_phase` changes from an INTEGER step
+counter to the Airtable status text, and the counter moves to `onboarding_step`.
+Doing it in one shot around a deploy breaks WhatsApp either way round:
+
+- code before SQL -> the new code queries a column that does not exist yet
+- SQL before code -> the old code writes integers into a text column
+
+`001a` only adds things, so the running app does not notice. `001b` retires the
+old column once nothing is using it, re-syncing the counter first so a user who
+was mid-onboarding during the deploy does not lose their place.
+
+Take a database backup before step 1.
+
+Run each file with:
+
+```bash
+npm run db:apply db/sql/001a_prepare.sql
+```
+
+Railway's Data tab cannot run these - it is a table browser that executes one
+statement and appends its own LIMIT. Use the command above.
+
+**Rollback:** `db/sql/001_mvp_schema_down.sql` restores the integer column and
+its values, and drops the new tables.
 
 ---
 

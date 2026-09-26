@@ -59,7 +59,8 @@ const AUTH = { Authorization: 'Bearer test-admin-token-12345' };
 (async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await db.query(read('init-db.sql'));
-  await db.query(read('db', 'sql', '001_mvp_schema_up.sql'));
+  await db.query(read('db', 'sql', '001a_prepare.sql'));
+  await db.query(read('db', 'sql', '001b_finalize.sql'));
 
   server = createApp().listen(0);
   await new Promise((r) => server.once('listening', r));
