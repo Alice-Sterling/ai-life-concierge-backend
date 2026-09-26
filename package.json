@@ -2,13 +2,21 @@
   "name": "ai-life-concierge-backend",
   "version": "1.0.0",
   "description": "Core backend for Ai Life Concierge - Twilio WhatsApp, Claude, PostgreSQL",
-  "main": "index.js",
+  "main": "server.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate": "node-pg-migrate -m db/migrations",
+    "migrate:up": "node-pg-migrate up -m db/migrations",
+    "migrate:down": "node-pg-migrate down -m db/migrations",
+    "test:smoke": "node tests/smoke.cjs",
+    "test": "node tests/routes.cjs",
+    "start:legacy": "node index.js",
+    "extract:legacy": "node scripts/extract-legacy.cjs",
+    "db:apply": "node scripts/apply-sql.cjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -17,11 +25,16 @@
     "@tavily/core": "^0.7.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
     "nanoid": "^3.3.7",
     "node-cron": "^4.2.1",
     "nodemailer": "^6.9.16",
     "pg": "^8.13.0",
     "stripe": "^20.4.1",
     "twilio": "^5.13.0"
+  },
+  "devDependencies": {
+    "node-pg-migrate": "^9.0.0"
   }
 }
