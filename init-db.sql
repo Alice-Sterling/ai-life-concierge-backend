@@ -114,7 +114,10 @@ DO $$ BEGIN
   END IF;
 END $$;
 
-ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_phase INTEGER NOT NULL DEFAULT 1;
+-- Renamed from onboarding_phase. The name onboarding_phase now holds the
+-- Airtable status strings; this remains the 1..8 conversational step counter.
+-- See db/sql/001_mvp_schema_up.sql.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_step INTEGER NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
 CREATE INDEX IF NOT EXISTS idx_users_client_id ON users(client_id);

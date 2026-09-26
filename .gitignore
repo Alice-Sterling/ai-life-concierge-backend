@@ -1,2 +1,9 @@
 # Local MCP config may contain API keys
 .cursor/mcp.json
+
+# Environment files
+.env
+.env.*
+!.env.example
+node_modules/
+*.bak
