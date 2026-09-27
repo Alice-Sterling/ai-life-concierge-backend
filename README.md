@@ -58,6 +58,31 @@ statement and appends its own LIMIT. Use the command above.
 **Rollback:** `db/sql/001_mvp_schema_down.sql` restores the integer column and
 its values, and drops the new tables.
 
+### Travel-aware timezone and token storage
+
+`db/sql/003_timezone_and_tokens.sql` is purely additive, but the code reads
+`users.active_timezone`, so it **must be applied before the code that uses it
+deploys**. Otherwise the webhook queries a column that does not exist.
+
+It adds:
+
+- `active_timezone` - the IANA zone the client is currently in, default
+  `Europe/London`. The agent updates it itself through the
+  `set_active_timezone` tool when a client mentions travelling, so Alice stops
+  assuming London time for everyone.
+- `calendar_access_token_enc` / `calendar_refresh_token_enc` - AES-256-GCM
+  encrypted storage for calendar OAuth tokens, keyed by `TOKEN_ENCRYPTION_KEY`.
+  Nothing writes them yet; they exist so the tokens can be moved off Airtable
+  as a deliberate step.
+
+`TOKEN_ENCRYPTION_KEY` must be 32 bytes of hex (`openssl rand -hex 32`).
+**Losing it makes every stored token unrecoverable.** Without it the app runs
+normally; only the token columns are unusable.
+
+Rollback: `db/sql/003_timezone_and_tokens_down.sql`. It drops the token
+columns, so any stored credentials are lost and clients would have to
+reconnect their calendars.
+
 ---
 
 ## Layout

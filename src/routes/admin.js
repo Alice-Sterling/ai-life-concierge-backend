@@ -14,6 +14,7 @@ const express = require('express');
 const users = require('../services/users');
 const tasks = require('../services/tasks');
 const conversations = require('../services/conversations');
+const timezone = require('../services/timezone');
 
 const router = express.Router();
 
@@ -95,6 +96,29 @@ router.post('/users/:userId/mode', wrap(async (req, res) => {
     conversation_mode: updated.conversation_mode,
     request_id: req.requestId,
   });
+}));
+
+/**
+ * Manual timezone override.
+ *
+ * The agent normally handles this itself via the set_active_timezone tool.
+ * This is the operator's escape hatch when it gets it wrong, or when a client
+ * tells a human rather than Alice.
+ */
+router.post('/users/:userId/timezone', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!UUID.test(userId)) {
+    return res.status(400).json({ error: 'userId must be a UUID', request_id: req.requestId });
+  }
+
+  const tz = req.body?.active_timezone ?? req.body?.timezone;
+  const updated = await timezone.setForUser(userId, tz, { requestId: req.requestId }, req.log);
+
+  if (!updated) {
+    return res.status(404).json({ error: 'User not found', request_id: req.requestId });
+  }
+
+  res.json({ ok: true, user_id: userId, ...updated, request_id: req.requestId });
 }));
 
 module.exports = router;

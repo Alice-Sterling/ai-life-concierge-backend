@@ -26,6 +26,7 @@ const { customAlphabet } = require('nanoid');
 
 // The shared pool, so this module does not open a second one.
 const { pool } = require('../db/pool');
+const timezoneService = require('../services/timezone');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -749,9 +750,13 @@ function buildAutomationIntakePending(user) {
   return pending.length ? pending.join(' | ') : 'none';
 }
 
-function buildEliteTriageSystemPrompt() {
-  const systemTime = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  return `[SYSTEM PROTOCOL] Current System Time: ${systemTime}. The master location is Horley, England (RH6). All temporal calculations (tomorrow, next week, current trial status) must be based strictly on this timestamp.
+function buildEliteTriageSystemPrompt(activeTimezone) {
+  // The client's own timezone, not the office's. Falls back to London so a
+  // missing or unusable value degrades to the previous behaviour.
+  const { timezone, localTime, utcOffset } = timezoneService.formatNowFor(activeTimezone);
+  return `[SYSTEM PROTOCOL] Current System Time: ${localTime} (${timezone}, ${utcOffset}). This is the CLIENT'S local time. The business is based in Horley, England (RH6). All temporal calculations (tomorrow, next week, current trial status) must be based strictly on this timestamp and this timezone.
+
+If the client mentions travelling, landing somewhere, or a local time that does not match ${timezone}, call set_active_timezone immediately, then continue. Do not ask a human to change it and do not ask the client to repeat themselves.
 
 ROLE: Alice, The Lifestyle Architect
 Persona: You are an elite, predictive AI concierge. You do not "help"; you "engineer outcomes." Your communication is concise, logical, and void of conversational filler.
@@ -1661,6 +1666,7 @@ async function getAgentTools(userId, options = {}) {
     ...pipedreamCalendarTools,
     SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
+    timezoneService.SET_TIMEZONE_TOOL,
   ];
 
   if (!composio || options.skipComposio) {
@@ -1842,7 +1848,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -1854,7 +1860,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -1936,6 +1942,17 @@ async function getHybridResponseFromMessages(
             payload = await saveOnboardingProfile(composioUserId, tu.input, options.senderPhoneNumber);
           } else if (tu.name === 'save_date_night_preferences') {
             payload = await saveDateNightPreferences(composioUserId, tu.input);
+          } else if (tu.name === 'set_active_timezone') {
+            try {
+              const tz = await timezoneService.setForUser(composioUserId, tu.input?.timezone);
+              payload = tz
+                ? JSON.stringify({ ok: true, ...tz, note: 'All later times use this timezone.' })
+                : JSON.stringify({ ok: false, error: 'User not found.' });
+            } catch (tzErr) {
+              // Hand the reason back to the agent rather than failing the turn:
+              // it can retry with a proper IANA name.
+              payload = JSON.stringify({ ok: false, error: tzErr.message });
+            }
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });
           }
@@ -2205,7 +2222,7 @@ Run the matching FLAGSHIP AUTOMATION FRAMEWORK intake protocol before proposing 
 Calendar Connected is True. You MUST call check_calendar_availability before proposing any specific date or time window.
 `
     : '';
-  const finalSystemPrompt = `${buildEliteTriageSystemPrompt()}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}`;
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,

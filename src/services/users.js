@@ -19,7 +19,8 @@ const PUBLIC_COLUMNS = `
   id, first_name, last_name, phone_number, email, client_id, short_id, tier,
   subscription_status, onboarding_status, onboarding_step, onboarding_phase,
   onboarding_completed_at, conversation_mode, last_date_curated_at,
-  date_night_cadence, next_date_due_at, created_at
+  date_night_cadence, next_date_due_at, active_timezone, active_timezone_set_at,
+  created_at
 `;
 
 async function findById(userId, log = logger) {

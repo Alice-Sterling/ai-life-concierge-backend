@@ -104,6 +104,10 @@ const config = {
     fetchArchitectureProfileToken: str('FETCH_ARCHITECTURE_PROFILE_TOKEN'),
   },
 
+  // Key for credentials held at rest, e.g. calendar OAuth tokens.
+  // 32 bytes of hex. Generate with: openssl rand -hex 32
+  encryption: { tokenKey: str('TOKEN_ENCRYPTION_KEY') },
+
   admin: {
     // Guards the /admin/* endpoints. No fallback value on purpose: an admin API
     // with a default token is an admin API with no token.
