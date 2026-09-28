@@ -62,6 +62,7 @@ const AUTH = { Authorization: 'Bearer test-admin-token-12345' };
   await db.query(read('db', 'sql', '001a_prepare.sql'));
   await db.query(read('db', 'sql', '001b_finalize.sql'));
   await db.query(read('db', 'sql', '003_timezone_and_tokens.sql'));
+  await db.query(read('db', 'sql', '004_message_batching.sql'));
 
   server = createApp().listen(0);
   await new Promise((r) => server.once('listening', r));

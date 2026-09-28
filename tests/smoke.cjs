@@ -30,6 +30,7 @@ const show = (label, r) => console.log(`  ${String(r.status).padEnd(3)} ${label}
   await db.query(fs.readFileSync(require('path').join(__dirname,'..','db','sql','001a_prepare.sql'),'utf8'));
   await db.query(fs.readFileSync(require('path').join(__dirname,'..','db','sql','001b_finalize.sql'),'utf8'));
   await db.query(fs.readFileSync(require('path').join(__dirname,'..','db','sql','003_timezone_and_tokens.sql'),'utf8'));
+  await db.query(fs.readFileSync(require('path').join(__dirname,'..','db','sql','004_message_batching.sql'),'utf8'));
   const { rows } = await db.query(
     `INSERT INTO users (first_name, last_name, phone_number, client_id, onboarding_status, onboarding_step)
      VALUES ('Ada','Lovelace','+447700900123','CID-001','complete',8) RETURNING id`);

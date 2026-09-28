@@ -16,6 +16,8 @@ const { logger } = require('./src/lib/logger');
 const { pool } = require('./src/db/pool');
 const legacy = require('./src/legacy/concierge');
 const nudgeJob = require('./src/jobs/nudge');
+const batcher = require('./src/services/messageBatcher');
+const webhookRoutes = require('./src/routes/webhook');
 
 async function main() {
   const { missingRequired, missingRecommended } = validate();
@@ -44,6 +46,11 @@ async function main() {
 
   nudgeJob.start();
 
+  // Answers each client's burst once they stop typing, instead of replying to
+  // every fragment. Disables itself and logs when Twilio cannot send, since a
+  // batched reply has to go out through the API rather than the webhook.
+  batcher.start(webhookRoutes.runConversationFlow, logger);
+
   const app = createApp();
   const server = app.listen(config.port, '0.0.0.0', () => {
     logger.info('boot.listening', { port: config.port, env: config.env });
@@ -60,6 +67,8 @@ async function main() {
       process.exit(1);
     }, 10_000);
     force.unref();
+
+    batcher.stop();
 
     server.close(async () => {
       try {
