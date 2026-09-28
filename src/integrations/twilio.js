@@ -51,9 +51,14 @@ async function sendWhatsApp(to, body, log = logger) {
     return false;
   }
   try {
+    // Both ends need the whatsapp: prefix. Twilio rejects a bare number with a
+    // confusing "channel mismatch", and whether the prefix is present depends
+    // on how the environment variable happened to be typed.
+    const withChannel = (n) => (String(n).startsWith('whatsapp:') ? String(n) : `whatsapp:${n}`);
+
     const msg = await client.messages.create({
-      from: config.twilio.whatsappFrom,
-      to: to.startsWith('whatsapp:') ? to : `whatsapp:${to}`,
+      from: withChannel(config.twilio.whatsappFrom),
+      to: withChannel(to),
       body,
     });
     log.info('twilio.message_sent', { integration: 'twilio', message_sid: msg.sid });
