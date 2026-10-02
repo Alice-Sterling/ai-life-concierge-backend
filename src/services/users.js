@@ -130,10 +130,10 @@ async function setDateNightCadence(userId, cadenceDays, log = logger) {
 
   const { rows } = await db.query(
     `UPDATE users
-        SET date_night_cadence = $2,
+        SET date_night_cadence = $2::int,
             next_date_due_at = CASE
               WHEN last_date_curated_at IS NULL THEN NULL
-              ELSE last_date_curated_at + ($2 || ' days')::interval END
+              ELSE last_date_curated_at + make_interval(days => $2::int) END
       WHERE id = $1
       RETURNING ${PUBLIC_COLUMNS}`,
     [userId, days], log);

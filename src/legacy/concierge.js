@@ -27,6 +27,7 @@ const { customAlphabet } = require('nanoid');
 // The shared pool, so this module does not open a second one.
 const { pool } = require('../db/pool');
 const timezoneService = require('../services/timezone');
+const dateNightService = require('../services/dateNight');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -806,6 +807,9 @@ I've prepared your secure vault access. Please complete the handshake here to sy
 Trigger: LIVE USER CONTEXT shows Onboarding Status: pending OR onboarding_step < 8.
 Execution: One phase per message. Wait for reply before advancing. Use onboarding_step in LIVE USER CONTEXT as your anchor.
 
+REQUEST FIRST - overrides the phase order:
+If the client makes a concrete request at any point (a dinner, a gift, a booking, travel, a recommendation), deliver on it in THIS message first: real, specific options using vault and web search. Ask only for the detail the request itself cannot proceed without (for dinner: area, date, party size). Then, at the end of the same message, ask the single next onboarding question. Never refuse, defer, or gate a request on the profile being incomplete. The client should get value before they give you their email.
+
 Phase 1 (Identity): Welcome. Ask for first and last name and preferred email.
 Phase 2 (Profile): Ask which profile fits (1–4): Founder/CEO, Executive/Professional, Investor/Family Office, Creative/Artist.
 Phase 3 (Friction): Map reply. Ask where to deploy value (1–4): Relationship & Milestone Management, Event & Lifestyle Curation, Bespoke Sourcing, Coordinating Logistics. If user picks multiple, store the primary in friction_points and note secondary in conversation.
@@ -825,7 +829,7 @@ When Active Automations in LIVE USER CONTEXT includes a slug below, run that aut
 General Rule: For any automation involving dates or times, complete intake first, then call check_calendar_availability before proposing specific slots.
 
 **date_night** (slug: date_night)
-Intake required: preferred neighborhood(s), cuisine dislikes, budget tier, dietary restrictions.
+Intake required: preferred neighborhood(s), cuisine dislikes, budget tier, dietary restrictions, and how often they want one (weekly, fortnightly, monthly - default fortnightly).
 Then: call check_calendar_availability for the target evening window before proposing a date night slot.
 When complete: call save_date_night_preferences.
 
@@ -933,6 +937,10 @@ const SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL = {
         type: 'array',
         items: { type: 'string' },
         description: 'Dietary needs (e.g. ["Gluten-free"] or ["None"]).',
+      },
+      cadence_days: {
+        type: 'integer',
+        description: 'How often the client wants a date night planned, in days: 7 weekly, 14 fortnightly, 30 monthly. Defaults to 14 if they have no preference.',
       },
     },
     required: ['neighborhood', 'budget', 'cuisines', 'dietary_restrictions'],
@@ -1612,10 +1620,22 @@ async function saveDateNightPreferences(userId, toolInput) {
     }
   }
 
+  // Without this the "bi-weekly recommendations" Alice promises never happen:
+  // nothing else sets a schedule. Failure here must not lose the preferences
+  // that were just saved, so it is reported back rather than thrown.
+  let schedule = null;
+  try {
+    schedule = await dateNightService.scheduleAfterIntake(userId, toolInput?.cadence_days);
+  } catch (error) {
+    console.error('[DATE_NIGHT] scheduling failed:', error.message);
+  }
+
   return JSON.stringify({
     success: true,
     message: 'Date Night preferences saved to the database and synced to operational records when configured.',
     date_night: updatedPreferences.date_night,
+    cadence_days: schedule?.date_night_cadence ?? null,
+    next_date_night_due: schedule?.next_date_due_at ?? null,
   });
 }
 

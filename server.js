@@ -16,6 +16,7 @@ const { logger } = require('./src/lib/logger');
 const { pool } = require('./src/db/pool');
 const legacy = require('./src/legacy/concierge');
 const nudgeJob = require('./src/jobs/nudge');
+const dateNightJob = require('./src/jobs/dateNight');
 const batcher = require('./src/services/messageBatcher');
 const webhookRoutes = require('./src/routes/webhook');
 
@@ -45,6 +46,7 @@ async function main() {
   }
 
   nudgeJob.start();
+  dateNightJob.start();
 
   // Answers each client's burst once they stop typing, instead of replying to
   // every fragment. Disables itself and logs when Twilio cannot send, since a

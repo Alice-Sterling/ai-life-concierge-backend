@@ -99,6 +99,41 @@ router.post('/users/:userId/mode', wrap(async (req, res) => {
 }));
 
 /**
+ * Move a task through its lifecycle.
+ *
+ * Operators work tasks in Airtable, which has no way to write back to Postgres.
+ * This is the bridge: an Airtable or n8n automation calls it when a task's
+ * status changes. Completing a date-night task schedules the client's next one.
+ */
+router.post('/tasks/:taskId/status', wrap(async (req, res) => {
+  const { taskId } = req.params;
+  if (!UUID.test(taskId)) {
+    return res.status(400).json({ error: 'taskId must be a UUID', request_id: req.requestId });
+  }
+
+  const status = req.body?.status;
+  if (!tasks.STATUSES.includes(status)) {
+    return res.status(400).json({
+      error: `status must be one of: ${tasks.STATUSES.join(', ')}`,
+      request_id: req.requestId,
+    });
+  }
+
+  const updated = await tasks.updateStatus(taskId, status, req.log);
+  if (!updated) {
+    return res.status(404).json({ error: 'Task not found', request_id: req.requestId });
+  }
+
+  res.json({
+    ok: true,
+    task_id: updated.task_id,
+    status: updated.status,
+    completed_at: updated.completed_at,
+    request_id: req.requestId,
+  });
+}));
+
+/**
  * Manual timezone override.
  *
  * The agent normally handles this itself via the set_active_timezone tool.

@@ -13,12 +13,13 @@
     "migrate:up": "node-pg-migrate up -m db/migrations",
     "migrate:down": "node-pg-migrate down -m db/migrations",
     "test:smoke": "node tests/smoke.cjs",
-    "test": "node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs",
+    "test": "node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs && node tests/date-night.cjs",
     "start:legacy": "node index.js",
     "extract:legacy": "node scripts/extract-legacy.cjs",
     "db:apply": "node scripts/apply-sql.cjs",
     "test:tz": "node tests/timezone-crypto.cjs",
-    "test:batch": "node tests/batching.cjs"
+    "test:batch": "node tests/batching.cjs",
+    "test:date-night": "node tests/date-night.cjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
