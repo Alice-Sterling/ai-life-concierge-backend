@@ -34,7 +34,7 @@ const days = (a, b) => Math.round((new Date(a) - new Date(b)) / 86_400_000);
 (async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await db.query(read('init-db.sql'));
-  for (const f of ['001a_prepare.sql', '001b_finalize.sql', '003_timezone_and_tokens.sql', '004_message_batching.sql']) {
+  for (const f of ['001a_prepare.sql', '001b_finalize.sql', '003_timezone_and_tokens.sql', '004_message_batching.sql', '005_front_door.sql']) {
     await db.query(read('db', 'sql', f));
   }
 

@@ -78,12 +78,43 @@ async function request(method, url, { body, log = logger } = {}) {
   }
 }
 
-/** Find one record by a field value. Returns the record id, or null. */
-async function findRecordId(tableRef, field, value, log = logger) {
+/** Find one record by a field value. Returns { id, fields }, or null. */
+async function findRecord(tableRef, field, value, log = logger) {
   const formula = encodeURIComponent(`{${field}} = '${escapeFormulaString(value)}'`);
   const url = `${tableUrl(tableRef)}?filterByFormula=${formula}&maxRecords=1`;
   const res = await request('GET', url, { log });
-  return res.ok ? res.data.records?.[0]?.id ?? null : null;
+  return res.ok ? res.data.records?.[0] ?? null : null;
+}
+
+/** Find one record by a field value. Returns the record id, or null. */
+async function findRecordId(tableRef, field, value, log = logger) {
+  return (await findRecord(tableRef, field, value, log))?.id ?? null;
+}
+
+/**
+ * Find a client's profile row: by Client ID first, then by phone.
+ *
+ * Phone is tried with and without the leading "+", because rows typed in by
+ * the web form and rows written by this service do not agree on the format.
+ *
+ * @returns {Promise<{id: string, fields: object}|null>}
+ */
+async function findUserRecord({ clientId = null, phone = null } = {}, log = logger) {
+  if (!isConfigured()) return null;
+  const tableRef = config.airtable.userTableRef;
+
+  if (clientId) {
+    const byId = await findRecord(tableRef, 'Client ID', clientId, log);
+    if (byId) return byId;
+  }
+
+  const clean = phone ? String(phone).replace(/^whatsapp:/i, '').trim() : '';
+  if (!clean) return null;
+  for (const candidate of new Set([clean, clean.replace(/^\+/, ''), `+${clean.replace(/^\+/, '')}`])) {
+    const byPhone = await findRecord(tableRef, config.airtable.phoneField, candidate, log);
+    if (byPhone) return byPhone;
+  }
+  return null;
 }
 
 /** Drop null and empty values so a partial update cannot blank a populated cell. */
@@ -196,4 +227,4 @@ async function healthCheck() {
   };
 }
 
-module.exports = { isConfigured, syncUser, syncTask, findRecordId, healthCheck };
+module.exports = { isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord, healthCheck };

@@ -28,6 +28,8 @@ const { customAlphabet } = require('nanoid');
 const { pool } = require('../db/pool');
 const timezoneService = require('../services/timezone');
 const dateNightService = require('../services/dateNight');
+const handoffService = require('../services/handoff');
+const usersService = require('../services/users');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -797,7 +799,11 @@ Do NOT trigger Human Fallback for:
 
 Human Fallback ONLY when: an ad-hoc bespoke request (not covered by an active automation) requires physical human presence beyond digital booking AND cannot be resolved with vault search + verified links.
 
-Fallback copy: "This request requires a human execution layer. Staging hand-off to the concierge desk now — assist@ailifeconcierge.co.uk"
+To hand off, call handoff_to_concierge. Then reply in one line: "This request requires a human execution layer. Staging hand-off to the concierge desk now."
+
+6. EXECUTION & HANDOFF PROTOCOL (CRITICAL)
+You cannot make final payments or bookings. The moment the client explicitly selects an option, confirms a car time, or agrees to an itinerary, call handoff_to_concierge with exact booking instructions (venue or vendor, date, time, party size, addresses, the option chosen). Then reply only: "Excellent choice. I am routing this to the execution team now to lock in the final details."
+Never write [TRIGGER_HUMAN_MODE], [AI_SUMMARY] or any other system tag in a message to the client.
 
 ### CALENDAR VAULT LINK (web OAuth only)
 When the user must connect their calendar, respond with exactly (substitute calendar_onboarding_link from LIVE USER CONTEXT for [LINK]):
@@ -1687,6 +1693,7 @@ async function getAgentTools(userId, options = {}) {
     SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
     timezoneService.SET_TIMEZONE_TOOL,
+    handoffService.HANDOFF_TOOL,
   ];
 
   if (!composio || options.skipComposio) {
@@ -1972,6 +1979,24 @@ async function getHybridResponseFromMessages(
               // Hand the reason back to the agent rather than failing the turn:
               // it can retry with a proper IANA name.
               payload = JSON.stringify({ ok: false, error: tzErr.message });
+            }
+          } else if (tu.name === 'handoff_to_concierge') {
+            try {
+              const handUser = await usersService.findById(composioUserId);
+              const task = handUser
+                ? await handoffService.toHuman(handUser, {
+                    summary: tu.input?.summary,
+                    category: tu.input?.category,
+                    priority: tu.input?.priority || 'high',
+                    sourceMessage: userMessage,
+                    requestId: options.requestId || null,
+                  })
+                : null;
+              payload = task
+                ? JSON.stringify({ ok: true, task_id: task.task_id, note: 'The desk has it. Tell the client in one line; you will now go quiet.' })
+                : JSON.stringify({ ok: false, error: 'User not found.' });
+            } catch (hoErr) {
+              payload = JSON.stringify({ ok: false, error: hoErr.message });
             }
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });

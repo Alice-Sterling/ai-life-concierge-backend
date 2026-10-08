@@ -41,25 +41,22 @@ function validateSignature(req) {
   return twilio.validateRequest(config.twilio.authToken, signature, url, req.body || {});
 }
 
-/**
- * Send a WhatsApp message.
- * @returns {Promise<boolean>} whether Twilio accepted it
- */
-async function sendWhatsApp(to, body, log = logger) {
+// Both ends need the whatsapp: prefix. Twilio rejects a bare number with a
+// confusing "channel mismatch", and whether the prefix is present depends on
+// how the environment variable happened to be typed.
+const withChannel = (n) => (String(n).startsWith('whatsapp:') ? String(n) : `whatsapp:${n}`);
+
+/** One send path for text and templates, so both log and fail the same way. */
+async function send(to, content, log) {
   if (!isConfigured()) {
     log.warn('twilio.not_configured', { integration: 'twilio' });
     return false;
   }
   try {
-    // Both ends need the whatsapp: prefix. Twilio rejects a bare number with a
-    // confusing "channel mismatch", and whether the prefix is present depends
-    // on how the environment variable happened to be typed.
-    const withChannel = (n) => (String(n).startsWith('whatsapp:') ? String(n) : `whatsapp:${n}`);
-
     const msg = await client.messages.create({
       from: withChannel(config.twilio.whatsappFrom),
       to: withChannel(to),
-      body,
+      ...content,
     });
     log.info('twilio.message_sent', { integration: 'twilio', message_sid: msg.sid });
     return true;
@@ -71,6 +68,27 @@ async function sendWhatsApp(to, body, log = logger) {
     });
     return false;
   }
+}
+
+/**
+ * Send a free-form WhatsApp message. Meta only delivers it inside the 24-hour
+ * window that opens when the client last wrote to us.
+ * @returns {Promise<boolean>} whether Twilio accepted it
+ */
+async function sendWhatsApp(to, body, log = logger) {
+  return send(to, { body }, log);
+}
+
+/**
+ * Send a Meta-approved template through the Content API. Works outside the
+ * 24-hour window, which makes it the only way to start a conversation.
+ *
+ * @param {string} contentSid HX... from the Twilio Content Template Builder
+ * @param {object} variables  {"1": "Sam", "2": "Ai-ABC123"} - numbered from 1, in order
+ * @returns {Promise<boolean>} whether Twilio accepted it
+ */
+async function sendTemplate(to, contentSid, variables = {}, log = logger) {
+  return send(to, { contentSid, contentVariables: JSON.stringify(variables) }, log);
 }
 
 /** Probe: fetch the account record. Read-only and cheap. */
@@ -96,4 +114,4 @@ async function healthCheck() {
   }
 }
 
-module.exports = { client, isConfigured, validateSignature, sendWhatsApp, healthCheck };
+module.exports = { client, isConfigured, validateSignature, sendWhatsApp, sendTemplate, healthCheck };

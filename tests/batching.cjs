@@ -41,6 +41,7 @@ const check = (label, actual, expected) => {
   await db.query(read('db', 'sql', '001b_finalize.sql'));
   await db.query(read('db', 'sql', '003_timezone_and_tokens.sql'));
   await db.query(read('db', 'sql', '004_message_batching.sql'));
+  await db.query(read('db', 'sql', '005_front_door.sql'));
 
   const { rows } = await db.query(
     `INSERT INTO users (first_name, phone_number) VALUES ('Burst','whatsapp:+447700900444') RETURNING id`);
