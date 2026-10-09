@@ -94,9 +94,9 @@ async function setOnboardingPhase(userId, phase, { requestId = null, fromAirtabl
   // a later status change.
   const { rows } = await db.query(
     `UPDATE users
-        SET onboarding_phase = $2,
+        SET onboarding_phase = $2::varchar,
             onboarding_completed_at = CASE
-              WHEN $2 IN ('Onboarded', 'Active') AND onboarding_completed_at IS NULL THEN NOW()
+              WHEN $2::varchar IN ('Onboarded', 'Active') AND onboarding_completed_at IS NULL THEN NOW()
               ELSE onboarding_completed_at END
       WHERE id = $1
       RETURNING ${PUBLIC_COLUMNS}`,
