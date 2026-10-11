@@ -20,9 +20,13 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
 
-const file = process.argv[2];
+// --prod reads PROD_DATABASE_URL instead of DATABASE_URL, so production is only
+// ever reached by asking for it by name, never by a stray DATABASE_URL.
+const args = process.argv.slice(2);
+const useProd = args.includes('--prod');
+const file = args.find((a) => !a.startsWith('--'));
 if (!file) {
-  console.error('Usage: node scripts/apply-sql.cjs <path-to.sql>');
+  console.error('Usage: node scripts/apply-sql.cjs <path-to.sql> [--prod]');
   process.exit(1);
 }
 
@@ -32,9 +36,9 @@ if (!fs.existsSync(full)) {
   process.exit(1);
 }
 
-const url = process.env.DATABASE_URL;
+const url = useProd ? process.env.PROD_DATABASE_URL : process.env.DATABASE_URL;
 if (!url) {
-  console.error('DATABASE_URL is not set.');
+  console.error(`${useProd ? 'PROD_DATABASE_URL' : 'DATABASE_URL'} is not set.`);
   process.exit(1);
 }
 
@@ -50,6 +54,7 @@ if (!url) {
   await client.connect();
 
   const host = (() => { try { return new URL(url).host; } catch { return 'unknown'; } })();
+  console.log(`target : ${useProd ? 'PRODUCTION (PROD_DATABASE_URL)' : 'DATABASE_URL'}`);
   console.log(`host   : ${host}`);
   console.log(`file   : ${path.relative(process.cwd(), full)}`);
   console.log('');

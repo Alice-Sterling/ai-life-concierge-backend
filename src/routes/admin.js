@@ -5,6 +5,7 @@
  *   GET  /admin/tasks                  recent tasks, optionally filtered by status
  *   GET  /admin/conversations/:userId  recent chat history for one user
  *   POST /admin/users/:userId/mode     toggle conversation_mode between ai and human
+ *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
  *
  * JSON only. No HTML dashboard, as specified. Every route sits behind the admin
  * bearer token and a tight rate limit, applied where the router is mounted.
@@ -15,6 +16,7 @@ const users = require('../services/users');
 const tasks = require('../services/tasks');
 const conversations = require('../services/conversations');
 const timezone = require('../services/timezone');
+const calendar = require('../services/calendar');
 
 const router = express.Router();
 
@@ -119,6 +121,32 @@ router.post('/users/:userId/timezone', wrap(async (req, res) => {
   }
 
   res.json({ ok: true, user_id: userId, ...updated, request_id: req.requestId });
+}));
+
+/**
+ * Store a finished calendar OAuth handshake.
+ *
+ * Called by the n8n onboarding workflow straight after it swaps the code for
+ * tokens. The tokens are encrypted here and never echoed back.
+ *
+ *   { client_id, provider: google|outlook, access_token, refresh_token?, expires_in?, scope? }
+ */
+router.post('/calendar/connect', wrap(async (req, res) => {
+  const b = req.body || {};
+  const result = await calendar.saveConnection({
+    clientId: b.client_id,
+    provider: b.provider,
+    accessToken: b.access_token,
+    refreshToken: b.refresh_token || null,
+    expiresIn: b.expires_in,
+    scope: b.scope || null,
+  }, { requestId: req.requestId }, req.log);
+
+  if (!result) {
+    return res.status(404).json({ error: 'No user with that client_id', request_id: req.requestId });
+  }
+
+  res.json({ ok: true, ...result, request_id: req.requestId });
 }));
 
 module.exports = router;

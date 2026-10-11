@@ -20,6 +20,7 @@ const EVENT = {
   HUMAN_HANDOFF_CREATED: 'human_handoff_created',
   CONVERSATION_MODE_CHANGED: 'conversation_mode_changed',
   SUBSCRIPTION_UPGRADED: 'subscription_upgraded',
+  CALENDAR_CONNECTED: 'calendar_connected',
 };
 
 /**
