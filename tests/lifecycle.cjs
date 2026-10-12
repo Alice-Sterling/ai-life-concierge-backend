@@ -257,6 +257,17 @@ const countSends = async (id, key) => (await db.query(
   check('"skip the starter" with no ping -> ordinary message',
     JSON.stringify(await proactiveReplies.handle(other, 'skip the starter please')), '{}');
 
+  console.log('\nFRONT DOOR TEST NUMBERS');
+  check('gate is off for everyone', config.gate.enabled, false);
+  config.gate.testNumbers = ['+447700900999'];
+  const beforeGate = sent.length;
+  await fetch(`${base}/webhook`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ From: 'whatsapp:+447700900999', Body: 'hello', MessageSid: 'SMtestgate1' }),
+  });
+  check('a test number goes through the front door', sent.length, beforeGate + 1);
+  check('unknown test number gets the invitation', /by invitation/.test(lastSent().body || ''), true);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   server.close();
   await db.pool?.end?.();

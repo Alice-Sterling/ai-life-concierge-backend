@@ -121,6 +121,10 @@ const config = {
   // are moved to Active. Turning it on is a variable change, not a deploy.
   gate: {
     enabled: bool('STATUS_GATE_ENABLED', false),
+    // Comma-separated numbers (+447...) that go through the gate even while it
+    // is off for everyone else. For live testing before the real switch-on.
+    testNumbers: str('STATUS_GATE_TEST_NUMBERS', '')
+      .split(',').map((n) => n.replace(/^whatsapp:/i, '').replace(/\s+/g, '')).filter(Boolean),
     waitlistUrl: str('WAITLIST_URL', 'https://ailifeconcierge.co.uk'),
     // The brief says /onboard; the link Alice sends today is /onboarding.
     // Defaults to the one already in use until the client confirms.

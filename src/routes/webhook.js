@@ -245,6 +245,10 @@ router.post('/webhook', async (req, res) => {
       : '<Response></Response>');
   };
 
+  // The front door: on for everyone, or only for the test numbers.
+  const gateOn = config.gate.enabled
+    || config.gate.testNumbers.includes(String(phoneNumber || '').replace(/^whatsapp:/i, '').replace(/\s+/g, ''));
+
   try {
     // --- 2. Identify -------------------------------------------------------
     let user = await legacy.getUserByPhone(phoneNumber);
@@ -253,7 +257,7 @@ router.post('/webhook', async (req, res) => {
     // With the front door on, membership is by invitation: a number nobody
     // knows is not given an account. Someone who signed up on the website is
     // in Airtable but not yet here, so look there before turning them away.
-    if (!user && config.gate.enabled) {
+    if (!user && gateOn) {
       user = await gateway.adoptFromAirtable(phoneNumber, profileName, log);
       if (!user) {
         log.info('webhook.unrecognized_number', {});
@@ -297,7 +301,7 @@ router.post('/webhook', async (req, res) => {
     // Status routing before anything else: only Active members reach Alice.
     // Before the human gate, so an Inactive member in human mode is still
     // told their membership is inactive rather than queued for the desk.
-    if (config.gate.enabled) {
+    if (gateOn) {
       const outcome = await gateway.admit(user, {
         phoneNumber, incomingText, requestId: req.requestId,
       }, userLog);
