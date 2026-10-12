@@ -20,8 +20,18 @@ const PUBLIC_COLUMNS = `
   subscription_status, onboarding_status, onboarding_step, onboarding_phase,
   onboarding_completed_at, conversation_mode, last_date_curated_at,
   date_night_cadence, next_date_due_at, active_timezone, active_timezone_set_at,
-  created_at
+  welcome_message_sent, conversation_mode_changed_at, created_at
 `;
+
+/**
+ * Map whatever is typed in Airtable's Status cell to one of ONBOARDING_PHASES.
+ * "On boarded", "onboarded" and "ACTIVE " all count; anything else is null.
+ */
+function normalizePhase(raw) {
+  if (raw == null) return null;
+  const key = String(Array.isArray(raw) ? raw[0] : raw).toLowerCase().replace(/[^a-z]/g, '');
+  return ONBOARDING_PHASES.find((p) => p.toLowerCase() === key) || null;
+}
 
 async function findById(userId, log = logger) {
   const { rows } = await db.query(
@@ -43,28 +53,35 @@ async function listRecent({ limit = 50 } = {}, log = logger) {
  * This is the manual override behind POST /admin/users/:userId/mode. While a
  * user is in 'human' mode the webhook queues their messages instead of replying.
  */
-async function setConversationMode(userId, mode, { requestId = null } = {}, log = logger) {
+async function setConversationMode(userId, mode, { requestId = null, source = 'admin' } = {}, log = logger) {
   if (!CONVERSATION_MODES.includes(mode)) {
     throw Object.assign(new Error(`Invalid conversation_mode: ${mode}`), { status: 400 });
   }
 
+  // The timestamp starts the auto-resume clock (src/jobs/humanModeResume.js).
   const { rows } = await db.query(
-    `UPDATE users SET conversation_mode = $2 WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}`,
+    `UPDATE users SET conversation_mode = $2, conversation_mode_changed_at = NOW()
+      WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}`,
     [userId, mode], log);
   const user = rows[0];
   if (!user) return null;
 
-  log.info('user.conversation_mode_changed', { user_id: userId, conversation_mode: mode });
+  log.info('user.conversation_mode_changed', { user_id: userId, conversation_mode: mode, source });
   await events.record(events.EVENT.CONVERSATION_MODE_CHANGED, {
-    userId, requestId, metadata: { conversation_mode: mode },
+    userId, requestId, metadata: { conversation_mode: mode, source },
   }, log);
 
   await pushToAirtable(user, log);
   return user;
 }
 
-/** Set the Airtable-facing status. Rejects anything outside the agreed options. */
-async function setOnboardingPhase(userId, phase, { requestId = null } = {}, log = logger) {
+/**
+ * Set the Airtable-facing status. Rejects anything outside the agreed options.
+ *
+ * `fromAirtable` skips the push back: when the change was read from Airtable,
+ * writing it back is a wasted call at best and a race with the operator at worst.
+ */
+async function setOnboardingPhase(userId, phase, { requestId = null, fromAirtable = false } = {}, log = logger) {
   if (!ONBOARDING_PHASES.includes(phase)) {
     throw Object.assign(
       new Error(`Invalid onboarding_phase: ${phase}. Expected one of: ${ONBOARDING_PHASES.join(', ')}`),
@@ -77,9 +94,9 @@ async function setOnboardingPhase(userId, phase, { requestId = null } = {}, log 
   // a later status change.
   const { rows } = await db.query(
     `UPDATE users
-        SET onboarding_phase = $2,
+        SET onboarding_phase = $2::varchar,
             onboarding_completed_at = CASE
-              WHEN $2 IN ('Onboarded', 'Active') AND onboarding_completed_at IS NULL THEN NOW()
+              WHEN $2::varchar IN ('Onboarded', 'Active') AND onboarding_completed_at IS NULL THEN NOW()
               ELSE onboarding_completed_at END
       WHERE id = $1
       RETURNING ${PUBLIC_COLUMNS}`,
@@ -87,13 +104,48 @@ async function setOnboardingPhase(userId, phase, { requestId = null } = {}, log 
   const user = rows[0];
   if (!user) return null;
 
-  log.info('user.onboarding_phase_changed', { user_id: userId, onboarding_phase: phase });
+  log.info('user.onboarding_phase_changed', { user_id: userId, onboarding_phase: phase, from_airtable: fromAirtable });
   if (phase === 'Onboarded') {
     await events.record(events.EVENT.ONBOARDING_COMPLETED, { userId, requestId }, log);
   }
 
-  await pushToAirtable(user, log);
+  if (!fromAirtable) await pushToAirtable(user, log);
   return user;
+}
+
+/**
+ * Claim the one-off welcome. Returns true only for the caller that flipped the
+ * flag, so two paths racing (Stripe and the inbound gate) cannot both send it.
+ */
+async function claimWelcome(userId, log = logger) {
+  const { rowCount } = await db.query(
+    `UPDATE users SET welcome_message_sent = true
+      WHERE id = $1 AND welcome_message_sent = false`,
+    [userId], log);
+  return rowCount === 1;
+}
+
+/**
+ * Users in human mode with no activity either way for `minutes`.
+ *
+ * Activity is the later of the hand-off itself and the last message in the
+ * conversation, so a client still talking to the desk is not handed back
+ * mid-thread. Operator replies sent outside this service (the Twilio console)
+ * are not visible here.
+ */
+async function findStaleHumanMode(minutes, log = logger) {
+  const { rows } = await db.query(
+    `SELECT u.id, u.first_name, u.phone_number
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT MAX(c.timestamp) AS last_ts FROM conversations c WHERE c.user_id = u.id
+       ) last ON true
+      WHERE u.conversation_mode = 'human'
+        AND GREATEST(COALESCE(u.conversation_mode_changed_at, 'epoch'),
+                     COALESCE(last.last_ts, 'epoch'))
+            < NOW() - make_interval(mins => $1::int)`,
+    [minutes], log);
+  return rows;
 }
 
 /**
@@ -130,10 +182,10 @@ async function setDateNightCadence(userId, cadenceDays, log = logger) {
 
   const { rows } = await db.query(
     `UPDATE users
-        SET date_night_cadence = $2,
+        SET date_night_cadence = $2::int,
             next_date_due_at = CASE
               WHEN last_date_curated_at IS NULL THEN NULL
-              ELSE last_date_curated_at + ($2 || ' days')::interval END
+              ELSE last_date_curated_at + make_interval(days => $2::int) END
       WHERE id = $1
       RETURNING ${PUBLIC_COLUMNS}`,
     [userId, days], log);
@@ -167,6 +219,9 @@ async function pushToAirtable(user, log = logger) {
 module.exports = {
   CONVERSATION_MODES,
   ONBOARDING_PHASES,
+  normalizePhase,
+  claimWelcome,
+  findStaleHumanMode,
   findById,
   listRecent,
   setConversationMode,

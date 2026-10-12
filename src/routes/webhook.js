@@ -26,6 +26,9 @@ const events = require('../services/events');
 const tasks = require('../services/tasks');
 const conversations = require('../services/conversations');
 const batcher = require('../services/messageBatcher');
+const gateway = require('../services/gateway');
+const handoff = require('../services/handoff');
+const users = require('../services/users');
 const legacy = require('../legacy/concierge');
 
 const router = express.Router();
@@ -160,10 +163,26 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
   // --- Agent ---------------------------------------------------------------
   const aiText = await legacy.runAgenticConcierge(user, incomingText, {
     senderPhoneNumber: phoneNumber || user.phone_number,
+    requestId,
   });
 
-  const replyBody =
-    typeof aiText === 'string' && aiText.trim() !== '' ? aiText : FALLBACK_REPLY;
+  // Alice hands off through the handoff_to_concierge tool. If she wrote the
+  // brief's [TRIGGER_HUMAN_MODE] tag instead, honour it - unless the tool
+  // already ran this turn - and never let the tag reach the client.
+  const tagged = handoff.extractTags(aiText);
+  if (tagged.triggered) {
+    const current = await users.findById(user.id, log);
+    if (current && current.conversation_mode !== 'human') {
+      await handoff.toHuman(current, {
+        summary: tagged.summary || tagged.text.slice(0, 2000),
+        sourceMessage: incomingText,
+        requestId,
+        via: 'tag',
+      }, log);
+    }
+  }
+
+  const replyBody = tagged.text !== '' ? tagged.text : FALLBACK_REPLY;
 
   if (legacy.getSubscriptionStatusFromUser(user) === 'PRO') {
     await tasks.create({
@@ -209,10 +228,32 @@ router.post('/webhook', async (req, res) => {
     log.error('webhook.signature_check_disabled_in_production', { integration: 'twilio' });
   }
 
+  /** Answer a message the front door stopped. */
+  const respondGate = (reply) => {
+    res.type('text/xml');
+    return res.send(reply?.via === 'inline'
+      ? legacy.twimlMessage(reply.text)
+      : '<Response></Response>');
+  };
+
   try {
     // --- 2. Identify -------------------------------------------------------
     let user = await legacy.getUserByPhone(phoneNumber);
     const isNewUser = !user;
+
+    // With the front door on, membership is by invitation: a number nobody
+    // knows is not given an account. Someone who signed up on the website is
+    // in Airtable but not yet here, so look there before turning them away.
+    if (!user && config.gate.enabled) {
+      user = await gateway.adoptFromAirtable(phoneNumber, profileName, log);
+      if (!user) {
+        log.info('webhook.unrecognized_number', {});
+        return respondGate(await gateway.rejectUnknown(phoneNumber, { requestId: req.requestId }, log));
+      }
+      await events.record(events.EVENT.WHATSAPP_STARTED, {
+        userId: user.id, requestId: req.requestId, metadata: { profile_name: profileName, adopted: true },
+      }, log);
+    }
 
     if (!user) {
       user = await legacy.createNewUser(phoneNumber, profileName);
@@ -242,6 +283,21 @@ router.post('/webhook', async (req, res) => {
       membership: legacy.getUserMembershipLabel(user),
       body_length: incomingText.length,
     });
+
+    // --- 2b. Front door ---------------------------------------------------
+    // Status routing before anything else: only Active members reach Alice.
+    // Before the human gate, so an Inactive member in human mode is still
+    // told their membership is inactive rather than queued for the desk.
+    if (config.gate.enabled) {
+      const outcome = await gateway.admit(user, {
+        phoneNumber, incomingText, requestId: req.requestId,
+      }, userLog);
+      if (outcome.halt) {
+        userLog.info('webhook.stopped_at_front_door', { onboarding_phase: user.onboarding_phase });
+        return respondGate(outcome.reply);
+      }
+      user = outcome.user;
+    }
 
     // --- 3. Human hand-off gate -------------------------------------------
     // Checked before any agent work so an operator's conversation is never

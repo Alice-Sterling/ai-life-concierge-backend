@@ -39,6 +39,8 @@ const AUTH = { Authorization: 'Bearer test-admin-token-12345', 'Content-Type': '
   await db.query(read('db', 'sql', '001a_prepare.sql'));
   await db.query(read('db', 'sql', '001b_finalize.sql'));
   await db.query(read('db', 'sql', '003_timezone_and_tokens.sql'));
+  await db.query(read('db', 'sql', '004_message_batching.sql'));
+  await db.query(read('db', 'sql', '005_front_door.sql'));
 
   const { rows } = await db.query(
     `INSERT INTO users (first_name, phone_number) VALUES ('Traveller','+447700900321') RETURNING id, active_timezone`);

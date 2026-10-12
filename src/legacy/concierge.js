@@ -27,6 +27,9 @@ const { customAlphabet } = require('nanoid');
 // The shared pool, so this module does not open a second one.
 const { pool } = require('../db/pool');
 const timezoneService = require('../services/timezone');
+const dateNightService = require('../services/dateNight');
+const handoffService = require('../services/handoff');
+const usersService = require('../services/users');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -796,7 +799,11 @@ Do NOT trigger Human Fallback for:
 
 Human Fallback ONLY when: an ad-hoc bespoke request (not covered by an active automation) requires physical human presence beyond digital booking AND cannot be resolved with vault search + verified links.
 
-Fallback copy: "This request requires a human execution layer. Staging hand-off to the concierge desk now — assist@ailifeconcierge.co.uk"
+To hand off, call handoff_to_concierge. Then reply in one line: "This request requires a human execution layer. Staging hand-off to the concierge desk now."
+
+6. EXECUTION & HANDOFF PROTOCOL (CRITICAL)
+You cannot make final payments or bookings. The moment the client explicitly selects an option, confirms a car time, or agrees to an itinerary, call handoff_to_concierge with exact booking instructions (venue or vendor, date, time, party size, addresses, the option chosen). Then reply only: "Excellent choice. I am routing this to the execution team now to lock in the final details."
+Never write [TRIGGER_HUMAN_MODE], [AI_SUMMARY] or any other system tag in a message to the client.
 
 ### CALENDAR VAULT LINK (web OAuth only)
 When the user must connect their calendar, respond with exactly (substitute calendar_onboarding_link from LIVE USER CONTEXT for [LINK]):
@@ -805,6 +812,9 @@ I've prepared your secure vault access. Please complete the handshake here to sy
 ### CONVERSATIONAL ONBOARDING PROTOCOL
 Trigger: LIVE USER CONTEXT shows Onboarding Status: pending OR onboarding_step < 8.
 Execution: One phase per message. Wait for reply before advancing. Use onboarding_step in LIVE USER CONTEXT as your anchor.
+
+REQUEST FIRST - overrides the phase order:
+If the client makes a concrete request at any point (a dinner, a gift, a booking, travel, a recommendation), deliver on it in THIS message first: real, specific options using vault and web search. Ask only for the detail the request itself cannot proceed without (for dinner: area, date, party size). Then, at the end of the same message, ask the single next onboarding question. Never refuse, defer, or gate a request on the profile being incomplete. The client should get value before they give you their email.
 
 Phase 1 (Identity): Welcome. Ask for first and last name and preferred email.
 Phase 2 (Profile): Ask which profile fits (1–4): Founder/CEO, Executive/Professional, Investor/Family Office, Creative/Artist.
@@ -825,7 +835,7 @@ When Active Automations in LIVE USER CONTEXT includes a slug below, run that aut
 General Rule: For any automation involving dates or times, complete intake first, then call check_calendar_availability before proposing specific slots.
 
 **date_night** (slug: date_night)
-Intake required: preferred neighborhood(s), cuisine dislikes, budget tier, dietary restrictions.
+Intake required: preferred neighborhood(s), cuisine dislikes, budget tier, dietary restrictions, and how often they want one (weekly, fortnightly, monthly - default fortnightly).
 Then: call check_calendar_availability for the target evening window before proposing a date night slot.
 When complete: call save_date_night_preferences.
 
@@ -933,6 +943,10 @@ const SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL = {
         type: 'array',
         items: { type: 'string' },
         description: 'Dietary needs (e.g. ["Gluten-free"] or ["None"]).',
+      },
+      cadence_days: {
+        type: 'integer',
+        description: 'How often the client wants a date night planned, in days: 7 weekly, 14 fortnightly, 30 monthly. Defaults to 14 if they have no preference.',
       },
     },
     required: ['neighborhood', 'budget', 'cuisines', 'dietary_restrictions'],
@@ -1612,10 +1626,22 @@ async function saveDateNightPreferences(userId, toolInput) {
     }
   }
 
+  // Without this the "bi-weekly recommendations" Alice promises never happen:
+  // nothing else sets a schedule. Failure here must not lose the preferences
+  // that were just saved, so it is reported back rather than thrown.
+  let schedule = null;
+  try {
+    schedule = await dateNightService.scheduleAfterIntake(userId, toolInput?.cadence_days);
+  } catch (error) {
+    console.error('[DATE_NIGHT] scheduling failed:', error.message);
+  }
+
   return JSON.stringify({
     success: true,
     message: 'Date Night preferences saved to the database and synced to operational records when configured.',
     date_night: updatedPreferences.date_night,
+    cadence_days: schedule?.date_night_cadence ?? null,
+    next_date_night_due: schedule?.next_date_due_at ?? null,
   });
 }
 
@@ -1667,6 +1693,7 @@ async function getAgentTools(userId, options = {}) {
     SAVE_ONBOARDING_PROFILE_ANTHROPIC_TOOL,
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
     timezoneService.SET_TIMEZONE_TOOL,
+    handoffService.HANDOFF_TOOL,
   ];
 
   if (!composio || options.skipComposio) {
@@ -1952,6 +1979,24 @@ async function getHybridResponseFromMessages(
               // Hand the reason back to the agent rather than failing the turn:
               // it can retry with a proper IANA name.
               payload = JSON.stringify({ ok: false, error: tzErr.message });
+            }
+          } else if (tu.name === 'handoff_to_concierge') {
+            try {
+              const handUser = await usersService.findById(composioUserId);
+              const task = handUser
+                ? await handoffService.toHuman(handUser, {
+                    summary: tu.input?.summary,
+                    category: tu.input?.category,
+                    priority: tu.input?.priority || 'high',
+                    sourceMessage: userMessage,
+                    requestId: options.requestId || null,
+                  })
+                : null;
+              payload = task
+                ? JSON.stringify({ ok: true, task_id: task.task_id, note: 'The desk has it. Tell the client in one line; you will now go quiet.' })
+                : JSON.stringify({ ok: false, error: 'User not found.' });
+            } catch (hoErr) {
+              payload = JSON.stringify({ ok: false, error: hoErr.message });
             }
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });

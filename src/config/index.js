@@ -116,6 +116,33 @@ const config = {
 
   cron: { nudgeSchedule: str('NUDGE_CRON_SCHEDULE') },
 
+  // The front door: status routing before Alice runs. Off by default so the
+  // code can ship before the templates are approved and the test accounts
+  // are moved to Active. Turning it on is a variable change, not a deploy.
+  gate: {
+    enabled: bool('STATUS_GATE_ENABLED', false),
+    waitlistUrl: str('WAITLIST_URL', 'https://ailifeconcierge.co.uk'),
+    // The brief says /onboard; the link Alice sends today is /onboarding.
+    // Defaults to the one already in use until the client confirms.
+    onboardingUrl: str('ONBOARDING_URL', 'https://ailifeconcierge.co.uk/onboarding'),
+    paymentUrl: str('PAYMENT_URL'),
+    // A user left in human mode this long with no activity goes back to Alice.
+    humanModeTimeoutMinutes: int('HUMAN_MODE_TIMEOUT_MINUTES', 120),
+  },
+
+  // Twilio Content SIDs (HX...) for the Meta-approved templates. A template
+  // with no SID can still be sent as plain text inside the 24-hour window,
+  // which covers every reply to an inbound message.
+  templates: {
+    unrecognized_user: str('TWILIO_TPL_UNRECOGNIZED_USER'),
+    status_waitlist: str('TWILIO_TPL_STATUS_WAITLIST'),
+    status_denied: str('TWILIO_TPL_STATUS_DENIED'),
+    status_approved: str('TWILIO_TPL_STATUS_APPROVED'),
+    pending_stripe: str('TWILIO_TPL_PENDING_STRIPE'),
+    membership_inactive: str('TWILIO_TPL_MEMBERSHIP_INACTIVE'),
+    active_welcome: str('TWILIO_TPL_ACTIVE_WELCOME'),
+  },
+
   security: {
     rateLimitWindowMs: int('RATE_LIMIT_WINDOW_MS', 60_000),
     rateLimitMax: int('RATE_LIMIT_MAX', 120),

@@ -65,6 +65,17 @@ async function updateStatus(taskId, status, log = logger) {
 
   log.info('task.status_changed', { task_id: taskId, status });
   await syncToAirtable(rows[0], log);
+
+  // Closing a date-night task schedules the next one. Required lazily: the
+  // date-night service creates tasks, so a top-level require would be circular.
+  if (rows[0].category === 'date_night' && status === 'completed') {
+    try {
+      await require('./dateNight').onTaskCompleted(rows[0], log);
+    } catch (err) {
+      // The task is closed either way; a failed reschedule is logged, not fatal.
+      log.error('task.date_night_reschedule_failed', { task_id: taskId, message: err.message });
+    }
+  }
   return rows[0];
 }
 
