@@ -92,17 +92,85 @@ const TEMPLATES = {
       + "your preferences are set up. Whenever you're ready for your first curation or need "
       + 'assistance, simply message me here. What can I take care of for you today?',
   },
+
+  // ---- Lifecycle (src/services/lifecycle.js) -------------------------
+  onboarding_reminder: {
+    name: 'ailc_onboarding_reminder_v1',
+    variables: (u) => ({ 1: firstName(u), 2: clientKey(u) }),
+    text: (u) =>
+      `Hello ${firstName(u)}, just a gentle reminder that your Founding Member invitation is `
+      + 'waiting. It only takes a few minutes to personalise Alice around your lifestyle:\n'
+      + withClientId(config.gate.onboardingUrl, u),
+  },
+  handshake_ping: {
+    name: 'ailc_active_handshake_ping_v1',
+    // Quick reply button: [ Ready ]
+    variables: (u) => ({ 1: firstName(u) }),
+    text: (u) =>
+      `Hello ${firstName(u)}, Alice here. Your 6-month Founding Member trial is officially live. `
+      + "I've successfully synced your calendar and prepared a quick briefing for your week ahead, "
+      + "along with your automation options. Reply 'Ready' to review it.",
+  },
+  datenight_ping: {
+    name: 'ailc_datenight_ping_v1',
+    // Quick reply buttons: [ Review Options ] | [ Skip This Week ]
+    // The brief's {{16}} / {{17}} are {{2}} / {{3}} here (Meta rejects gaps).
+    variables: (u) => ({ 1: firstName(u), 2: cadenceWord(u), 3: partnerName(u) }),
+    text: (u) =>
+      `Hello ${firstName(u)}, it's time for your ${cadenceWord(u)} date night curation! I've reviewed `
+      + `your calendar and prepared a few bespoke options for you and ${partnerName(u)}. `
+      + "Reply 'Review' to see them, or 'Skip' to skip this week.",
+  },
+  // Plain text only: it goes out 4 hours after Alice's options, inside the window.
+  proposal_nudge: {
+    name: null,
+    variables: () => ({}),
+    text: (u) =>
+      `Hello ${firstName(u)}, just keeping this warm. Did either of those options catch your eye, `
+      + 'or would you like me to look in a different direction?',
+  },
 };
 
+/** 7 -> weekly, 14 -> fortnightly, 28-31 -> monthly, as the brief maps {{16}}. */
+function cadenceWord(user) {
+  const d = Number(user?.date_night_cadence);
+  if (d === 7) return 'weekly';
+  if (d === 14) return 'fortnightly';
+  if (d >= 28 && d <= 31) return 'monthly';
+  return 'regular';
+}
+
+/** The partner's name from the preferences, wherever intake put it. */
+function partnerName(user) {
+  const p = user?.preferences || {};
+  const name = p.date_night?.partner_name || p.partner_name || p.lifestyle?.partner_name;
+  return name && String(name).trim() ? String(name).trim() : 'your partner';
+}
+
 /** Was this template sent to this user recently? Stops five "hello?"s getting five replies. */
-async function sentRecently(userId, key, log = logger) {
+async function sentRecently(userId, key, log = logger, hours = REPEAT_WINDOW_HOURS) {
   if (!userId) return false;
   const { rows } = await db.query(
     `SELECT 1 FROM outbound_messages
       WHERE user_id = $1 AND template_key = $2
         AND created_at > NOW() - make_interval(hours => $3::int)
       LIMIT 1`,
-    [userId, key, REPEAT_WINDOW_HOURS], log);
+    [userId, key, hours], log);
+  return rows.length > 0;
+}
+
+/**
+ * Is the client inside Meta's 24-hour window, i.e. did they write to us in
+ * the last 24 hours? Inside it a plain-text twin can stand in for a template
+ * that is not approved yet.
+ */
+async function inWindow(userId, log = logger) {
+  if (!userId) return false;
+  const { rows } = await db.query(
+    `SELECT 1 FROM conversations
+      WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '23 hours 30 minutes'
+      LIMIT 1`,
+    [userId], log);
   return rows.length > 0;
 }
 
@@ -157,4 +225,4 @@ async function send(key, { to, user = null, inWindow = true, requestId = null } 
   return { sent: ok, text, via };
 }
 
-module.exports = { TEMPLATES, REPEAT_WINDOW_HOURS, sentRecently, send };
+module.exports = { TEMPLATES, REPEAT_WINDOW_HOURS, sentRecently, inWindow, cadenceWord, partnerName, send };

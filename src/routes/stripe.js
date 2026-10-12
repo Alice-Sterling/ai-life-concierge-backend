@@ -11,6 +11,7 @@ const { config } = require('../config');
 const stripeIntegration = require('../integrations/stripe');
 const db = require('../db/pool');
 const events = require('../services/events');
+const lifecycle = require('../services/lifecycle');
 
 const router = express.Router();
 
@@ -61,15 +62,23 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
 
     // Phone is the primary key for a WhatsApp product; email is the fallback
     // for checkouts that never captured one.
+    // The onboarding payment link carries the Airtable Client ID as
+    // client_reference_id, which is the most reliable key of the three.
     let user = null;
-    if (phone) {
+    const clientRef = session.client_reference_id || session.metadata?.client_id || null;
+    if (clientRef) {
       const { rows } = await db.query(
-        'SELECT id, phone_number, email FROM users WHERE phone_number = $1', [phone], log);
+        'SELECT * FROM users WHERE client_id = $1::varchar OR short_id = $1::varchar LIMIT 1', [clientRef], log);
+      user = rows[0] || null;
+    }
+    if (!user && phone) {
+      const { rows } = await db.query(
+        'SELECT * FROM users WHERE phone_number = $1', [phone], log);
       user = rows[0] || null;
     }
     if (!user && email) {
       const { rows } = await db.query(
-        'SELECT id, phone_number, email FROM users WHERE email = $1', [email], log);
+        'SELECT * FROM users WHERE email = $1', [email], log);
       user = rows[0] || null;
     }
 
@@ -86,6 +95,11 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
     await events.record(events.EVENT.SUBSCRIPTION_UPGRADED, {
       userId: user.id, requestId: req.requestId, metadata: { tier: 'pro', source: 'stripe' },
     }, log);
+
+    // Brief: checkout completed -> status Active in Airtable -> welcome.
+    if (config.lifecycle.stripeActivates) {
+      await lifecycle.activate(user, { source: 'stripe', requestId: req.requestId }, log);
+    }
   } catch (err) {
     // Return 200 even on failure: Stripe would otherwise retry for days, and a
     // database error will not fix itself on the third attempt. The event is in

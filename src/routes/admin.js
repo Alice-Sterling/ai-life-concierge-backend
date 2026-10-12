@@ -6,6 +6,7 @@
  *   GET  /admin/conversations/:userId  recent chat history for one user
  *   POST /admin/users/:userId/mode     toggle conversation_mode between ai and human
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
+ *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
  *
  * JSON only. No HTML dashboard, as specified. Every route sits behind the admin
  * bearer token and a tight rate limit, applied where the router is mounted.
@@ -17,6 +18,7 @@ const tasks = require('../services/tasks');
 const conversations = require('../services/conversations');
 const timezone = require('../services/timezone');
 const calendar = require('../services/calendar');
+const lifecycle = require('../services/lifecycle');
 
 const router = express.Router();
 
@@ -181,6 +183,28 @@ router.post('/calendar/connect', wrap(async (req, res) => {
     return res.status(404).json({ error: 'No user with that client_id', request_id: req.requestId });
   }
 
+  res.json({ ok: true, ...result, request_id: req.requestId });
+}));
+
+/**
+ * A client's status was changed in Airtable. n8n polls Airtable and calls
+ * this; the backend copies the status and sends the brief's template.
+ * Repeats within 24 hours are suppressed, so a re-poll is harmless.
+ *
+ *   { client_id?, phone?, status }
+ */
+router.post('/users/status-changed', wrap(async (req, res) => {
+  const b = req.body || {};
+  if (!b.client_id && !b.phone) {
+    return res.status(400).json({ error: 'client_id or phone is required', request_id: req.requestId });
+  }
+  const result = await lifecycle.onStatusChange({
+    clientId: b.client_id || null, phone: b.phone || null, status: b.status,
+  }, { requestId: req.requestId }, req.log);
+
+  if (!result) {
+    return res.status(404).json({ error: 'No user with that client_id or phone', request_id: req.requestId });
+  }
   res.json({ ok: true, ...result, request_id: req.requestId });
 }));
 

@@ -25,6 +25,8 @@ const db = require('../db/pool');
 const tasks = require('./tasks');
 const events = require('./events');
 const users = require('./users');
+const templates = require('./templates');
+const { config } = require('../config');
 const { logger } = require('../lib/logger');
 
 /** "Bi-weekly" is what Alice promises, so it is the default. */
@@ -136,11 +138,54 @@ async function hasOpenDateNightTask(userId, log = logger) {
  *
  * @returns {Promise<{due: number, created: number, skipped: number, failed: number}>}
  */
-async function runDueSweep(log = logger) {
+/** The client's local hour, 0-23. */
+function localHour(timezone, now = new Date()) {
+  try {
+    return Number(new Intl.DateTimeFormat('en-GB', {
+      hour: 'numeric', hourCycle: 'h23', timeZone: timezone || 'Europe/London',
+    }).format(now));
+  } catch {
+    return now.getUTCHours();
+  }
+}
+
+/**
+ * Ping mode (Project 3, Flow 1): ask the client first, with Review / Skip
+ * buttons, instead of handing the desk a task. The cycle moves on when the
+ * ping goes out, so ignoring it costs the client one cycle, not a daily ping.
+ *
+ * @returns {Promise<boolean>} false when the ping could not be delivered
+ *   (no approved template and the client is outside the 24-hour window)
+ */
+async function sendPing(user, log) {
+  const inWindow = await templates.inWindow(user.id, log);
+  if (!config.templates.datenight_ping && !inWindow) return false;
+
+  const sent = await templates.send('datenight_ping', { to: user.phone_number, user, inWindow }, log);
+  if (!sent.sent || sent.via === 'inline') return false;
+
+  await db.query(
+    `UPDATE users
+        SET next_date_due_at = NOW() + make_interval(days => COALESCE(date_night_cadence, $2)::int)
+      WHERE id = $1`,
+    [user.id, DEFAULT_CADENCE_DAYS], log);
+  await events.record('date_night_pinged', {
+    userId: user.id, metadata: { cadence_days: user.date_night_cadence, via: sent.via },
+  }, log);
+  return true;
+}
+
+async function runDueSweep(log = logger, { now = new Date() } = {}) {
   const due = await users.findDueForDateNight({ limit: 100 }, log);
-  const result = { due: due.length, created: 0, skipped: 0, failed: 0 };
+  const result = { due: due.length, created: 0, pinged: 0, skipped: 0, failed: 0 };
+  const pingMode = config.lifecycle.dateNightPing;
 
   for (const u of due) {
+    // Pings go out in the client's own morning; until then they simply wait.
+    if (pingMode && localHour(u.active_timezone, now) !== config.lifecycle.dateNightPingHour) {
+      result.skipped += 1;
+      continue;
+    }
     const userLog = log.child({ user_id: u.id });
     const logId = await events.logAutomation('date_night_cron', 'pending', { userId: u.id }, userLog);
 
@@ -154,7 +199,14 @@ async function runDueSweep(log = logger) {
       const { rows } = await db.query(
         'SELECT preferences, active_timezone FROM users WHERE id = $1', [u.id], userLog);
       const prefs = rows[0]?.preferences?.date_night || {};
-      const user = { ...u, active_timezone: rows[0]?.active_timezone };
+      const user = { ...u, active_timezone: rows[0]?.active_timezone, preferences: rows[0]?.preferences || {} };
+
+      if (pingMode && await sendPing(user, userLog)) {
+        await events.completeAutomation(logId, 'success', 'pinged', userLog);
+        result.pinged += 1;
+        continue;
+      }
+      // Ping mode off, or the ping could not be delivered: the desk gets the brief.
       const matches = await findVaultMatches(prefs.neighborhood, userLog);
 
       await tasks.create({
@@ -202,6 +254,7 @@ module.exports = {
   scheduleAfterIntake,
   findVaultMatches,
   buildBrief,
+  localHour,
   runDueSweep,
   onTaskCompleted,
 };

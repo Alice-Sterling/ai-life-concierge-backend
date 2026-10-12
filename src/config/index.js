@@ -141,6 +141,27 @@ const config = {
     pending_stripe: str('TWILIO_TPL_PENDING_STRIPE'),
     membership_inactive: str('TWILIO_TPL_MEMBERSHIP_INACTIVE'),
     active_welcome: str('TWILIO_TPL_ACTIVE_WELCOME'),
+    onboarding_reminder: str('TWILIO_TPL_ONBOARDING_REMINDER'),
+    handshake_ping: str('TWILIO_TPL_HANDSHAKE_PING'),
+    datenight_ping: str('TWILIO_TPL_DATENIGHT_PING'),
+  },
+
+  // Proactive messages. Each one is off until its template is approved and
+  // tested, then turned on with a variable change, not a deploy.
+  lifecycle: {
+    // Stripe checkout sets status Active and sends the welcome. Off: Stripe
+    // keeps today's behaviour (tier only).
+    stripeActivates: bool('STRIPE_SETS_ACTIVE', false),
+    onboardingReminder: bool('ONBOARDING_REMINDER_ENABLED', false),
+    onboardingReminderHours: int('ONBOARDING_REMINDER_HOURS', 24),
+    handshakePing: bool('HANDSHAKE_PING_ENABLED', false),
+    handshakeHours: int('HANDSHAKE_PING_HOURS', 48),
+    proposalNudge: bool('PROPOSAL_NUDGE_ENABLED', false),
+    proposalNudgeHours: int('PROPOSAL_NUDGE_HOURS', 4),
+    // On: a due date night sends the morning ping. Off: it raises a desk task, as before.
+    dateNightPing: bool('DATE_NIGHT_PING_ENABLED', false),
+    dateNightPingHour: int('DATE_NIGHT_PING_HOUR', 9),
+    schedule: str('LIFECYCLE_CRON_SCHEDULE', '*/15 * * * *'),
   },
 
   security: {

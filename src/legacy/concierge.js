@@ -2267,7 +2267,15 @@ Run the matching FLAGSHIP AUTOMATION FRAMEWORK intake protocol before proposing 
 Calendar Connected is True. You MUST call check_calendar_availability before proposing any specific date or time window.
 `
     : '';
-  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}`;
+  // One-turn instruction from a proactive ping the client just answered
+  // (src/services/proactiveReplies.js).
+  const proactiveBlock = options.contextNote
+    ? `
+### PROACTIVE CONTEXT (this message only)
+${options.contextNote}
+`
+    : '';
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}${proactiveBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,

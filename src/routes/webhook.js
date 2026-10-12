@@ -29,6 +29,7 @@ const batcher = require('../services/messageBatcher');
 const gateway = require('../services/gateway');
 const handoff = require('../services/handoff');
 const users = require('../services/users');
+const proactiveReplies = require('../services/proactiveReplies');
 const legacy = require('../legacy/concierge');
 
 const router = express.Router();
@@ -65,6 +66,13 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
     await legacy.resetOnboardingState(user.id);
     const refreshed = await legacy.getUserByPhone(phoneNumber);
     if (refreshed) user = refreshed;
+  }
+
+  // --- Answers to Alice's proactive pings (Skip / Review / Ready) ---------
+  const ping = await proactiveReplies.handle(user, incomingText, { requestId }, log);
+  if (ping.reply) {
+    await conversations.save(user.id, incomingText, ping.reply, { ping_reply: true }, log);
+    return ping.reply;
   }
 
   // --- Systems-sync handshake ----------------------------------------------
@@ -164,6 +172,7 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
   const aiText = await legacy.runAgenticConcierge(user, incomingText, {
     senderPhoneNumber: phoneNumber || user.phone_number,
     requestId,
+    contextNote: ping.contextNote || null,
   });
 
   // Alice hands off through the handoff_to_concierge tool. If she wrote the
