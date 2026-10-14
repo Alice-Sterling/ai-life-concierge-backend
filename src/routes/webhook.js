@@ -42,6 +42,20 @@ const HUMAN_MODE_ACK =
 
 const FALLBACK_REPLY = 'I have received your message. One moment while I prepare a reply.';
 
+/** How long after the trial nudge a bare "yes" still answers it. */
+const TRIAL_NUDGE_ANSWER_HOURS = 48;
+
+/**
+ * A short "yes" / "trial" reply from a non-Active client who was sent the
+ * trial nudge recently. Anything else is an ordinary message for Alice.
+ */
+function isTrialNudgeAnswer(user, text) {
+  if (!/^\s*(yes|yes please|yes!|trial)\b[\s!.]*$/i.test(String(text || ''))) return false;
+  if (user?.onboarding_phase === 'Active') return false;
+  const nudgedAt = user?.last_nudge_at ? new Date(user.last_nudge_at).getTime() : 0;
+  return nudgedAt > Date.now() - TRIAL_NUDGE_ANSWER_HOURS * 3600e3;
+}
+
 /**
  * Everything that happens to a message once the user is known and is not in
  * human mode: Airtable enrichment, the handshake phrases, the trial branch,
@@ -137,7 +151,10 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
   }
 
   // --- Trial request -------------------------------------------------------
-  if (/\b(yes|trial)\b/i.test(incomingText)) {
+  // Only an answer to the trial nudge ("Reply 'YES' to begin") counts. Before,
+  // any message containing "yes" or "trial" ("yes, book it for 8pm") was
+  // hijacked into a trial request and never reached Alice.
+  if (isTrialNudgeAnswer(user, incomingText)) {
     const upgradeResponse =
       'Understood. I am notifying the Human Architect to authenticate your Pro Concierge trial '
       + 'and begin your calendar integration. Would you please provide your email address? '
@@ -388,3 +405,4 @@ router.post('/webhook', async (req, res) => {
 
 module.exports = router;
 module.exports.runConversationFlow = runConversationFlow;
+module.exports.isTrialNudgeAnswer = isTrialNudgeAnswer;

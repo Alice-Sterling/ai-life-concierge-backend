@@ -30,6 +30,7 @@ const timezoneService = require('../services/timezone');
 const dateNightService = require('../services/dateNight');
 const handoffService = require('../services/handoff');
 const usersService = require('../services/users');
+const promptContext = require('../services/promptContext');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -1875,7 +1876,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone, calendar_connected FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -2178,7 +2179,10 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const calendarOnboardingLink = await generateOnboardingLink(user.id);
 
   const calendarProviderNorm = normalizeCalendarProviderValue(user.calendar_provider);
-  const isConnected = calendarProviderNorm === 'google' || calendarProviderNorm === 'outlook';
+  // calendar_connected is set when the backend stores the OAuth tokens
+  // (POST /admin/calendar/connect); the provider check covers older users.
+  const isConnected = user.calendar_connected === true
+    || calendarProviderNorm === 'google' || calendarProviderNorm === 'outlook';
   const calendarQueryWebhookConfigured = Boolean(
     process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK && String(process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK).trim()
   );
@@ -2275,7 +2279,11 @@ Calendar Connected is True. You MUST call check_calendar_availability before pro
 ${options.contextNote}
 `
     : '';
-  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}${proactiveBlock}`;
+  // Step C (Project 3): flattened profile, open desk tasks, calendar status.
+  const profileBlock = promptContext.profileBlock(user);
+  const tasksBlock = await promptContext.tasksBlock(user.id);
+  const calendarStatusBlock = promptContext.calendarBlock(user);
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${profileBlock}${tasksBlock}${calendarStatusBlock}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}${proactiveBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,
