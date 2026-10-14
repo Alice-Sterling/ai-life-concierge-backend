@@ -49,7 +49,7 @@ const unstubAirtable = () => { airtable.findUserRecord = realLookup; };
 (async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await db.query(read('init-db.sql'));
-  for (const f of ['001a_prepare.sql', '001b_finalize.sql', '003_timezone_and_tokens.sql', '004_message_batching.sql', '005_front_door.sql']) {
+  for (const f of ['001a_prepare.sql', '001b_finalize.sql', '003_timezone_and_tokens.sql', '004_message_batching.sql', '005_front_door.sql', '006_calendar_connection.sql', '007_lifecycle.sql']) {
     await db.query(read('db', 'sql', f));
   }
 

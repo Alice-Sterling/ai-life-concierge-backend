@@ -188,4 +188,177 @@ async function saveConnection(
   };
 }
 
-module.exports = { PROVIDERS, normaliseProvider, toIana, fetchTimezone, saveConnection };
+// ---------------------------------------------------------------------------
+// Reading the client's calendar with their own tokens (Project 3: "inject
+// per-user tokens for calendar calls"). Replaces a shared, single-account
+// connection: every client's availability comes from their own calendar.
+// ---------------------------------------------------------------------------
+
+const TOKEN_ENDPOINT = {
+  google: 'https://oauth2.googleapis.com/token',
+  outlook: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+};
+const OUTLOOK_SCOPE = 'offline_access User.Read Calendars.ReadWrite MailboxSettings.Read';
+
+/** Refresh this long before expiry, so a token never dies mid-request. */
+const REFRESH_MARGIN_MS = 2 * 60 * 1000;
+const MAX_EVENTS = 100;
+
+function oauthClient(provider) {
+  const { config } = require('../config');
+  const c = config.calendarOAuth?.[provider] || {};
+  return c.clientId && c.clientSecret ? c : null;
+}
+
+/**
+ * A usable access token for this user, refreshing it when it is about to
+ * expire. Null when the user has no stored tokens, or the token has expired
+ * and cannot be refreshed (no refresh token, or no OAuth client configured).
+ *
+ * @returns {Promise<{token: string, provider: string}|null>}
+ */
+async function getAccessToken(userId, log = logger) {
+  if (!crypto.isConfigured()) return null;
+  const { rows } = await db.query(
+    `SELECT calendar_provider, calendar_access_token_enc, calendar_refresh_token_enc, calendar_token_expires_at
+       FROM users WHERE id = $1`, [userId], log);
+  const row = rows[0];
+  const provider = normaliseProvider(row?.calendar_provider);
+  if (!row?.calendar_access_token_enc || !provider) return null;
+
+  const expiresAt = row.calendar_token_expires_at ? new Date(row.calendar_token_expires_at).getTime() : 0;
+  if (expiresAt > Date.now() + REFRESH_MARGIN_MS) {
+    return { token: crypto.decrypt(row.calendar_access_token_enc), provider };
+  }
+
+  const client = oauthClient(provider);
+  if (!row.calendar_refresh_token_enc || !client) {
+    log.warn('calendar.token_expired_no_refresh', { provider, has_refresh: Boolean(row.calendar_refresh_token_enc) });
+    return null;
+  }
+
+  const form = new URLSearchParams({
+    client_id: client.clientId,
+    client_secret: client.clientSecret,
+    refresh_token: crypto.decrypt(row.calendar_refresh_token_enc),
+    grant_type: 'refresh_token',
+  });
+  if (provider === 'outlook') form.set('scope', OUTLOOK_SCOPE);
+
+  try {
+    const res = await fetch(TOKEN_ENDPOINT[provider], {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS * 2),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.access_token) {
+      // invalid_grant = the client revoked access. Only then do they need to reconnect.
+      log.warn('calendar.token_refresh_failed', { provider, status: res.status, error: body.error || null });
+      if (body.error === 'invalid_grant') {
+        await db.query('UPDATE users SET calendar_connected = false WHERE id = $1', [userId], log);
+      }
+      return null;
+    }
+
+    const seconds = Number(body.expires_in) || 3600;
+    await db.query(
+      `UPDATE users
+          SET calendar_access_token_enc  = $2,
+              calendar_refresh_token_enc = COALESCE($3, calendar_refresh_token_enc),
+              calendar_token_expires_at  = NOW() + make_interval(secs => $4::int),
+              calendar_token_updated_at  = NOW()
+        WHERE id = $1`,
+      [userId, crypto.encrypt(body.access_token),
+        body.refresh_token ? crypto.encrypt(body.refresh_token) : null, seconds],
+      log);
+    log.info('calendar.token_refreshed', { provider });
+    return { token: body.access_token, provider };
+  } catch (err) {
+    log.warn('calendar.token_refresh_failed', { provider, message: err.message });
+    return null;
+  }
+}
+
+async function fetchJson(url, headers, log, provider) {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS * 2) });
+  if (!res.ok) {
+    log.warn('calendar.read_failed', { provider, status: res.status });
+    return null;
+  }
+  return res.json();
+}
+
+/**
+ * The client's events between two instants, read with their own token.
+ * Titles only: descriptions, attendees and locations never leave the provider.
+ *
+ * @returns {Promise<{ok: true, provider, busy: {start,end}[], events: {title,start,end,all_day}[]}
+ *                  | {ok: false, reason: string}>}
+ */
+async function readEvents(userId, startTime, endTime, log = logger) {
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    return { ok: false, reason: 'invalid_window' };
+  }
+
+  const access = await getAccessToken(userId, log);
+  if (!access) return { ok: false, reason: 'no_usable_token' };
+  const auth = { Authorization: `Bearer ${access.token}` };
+
+  let items;
+  try {
+    if (access.provider === 'google') {
+      const qs = new URLSearchParams({
+        timeMin: start.toISOString(), timeMax: end.toISOString(), singleEvents: 'true',
+        orderBy: 'startTime', maxResults: String(MAX_EVENTS),
+        fields: 'items(summary,start,end,status,transparency)',
+      });
+      const body = await fetchJson(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events?${qs}`, auth, log, 'google');
+      if (!body) return { ok: false, reason: 'provider_error' };
+      items = (body.items || [])
+        .filter((e) => e.status !== 'cancelled' && e.transparency !== 'transparent')
+        .map((e) => ({
+          title: e.summary || '(busy)',
+          start: e.start?.dateTime || e.start?.date,
+          end: e.end?.dateTime || e.end?.date,
+          all_day: Boolean(e.start?.date && !e.start?.dateTime),
+        }));
+    } else {
+      const qs = new URLSearchParams({
+        startDateTime: start.toISOString(), endDateTime: end.toISOString(),
+        $select: 'subject,start,end,showAs,isCancelled,isAllDay', $top: String(MAX_EVENTS), $orderby: 'start/dateTime',
+      });
+      const body = await fetchJson(
+        `https://graph.microsoft.com/v1.0/me/calendarView?${qs}`,
+        { ...auth, Prefer: 'outlook.timezone="UTC"' }, log, 'outlook');
+      if (!body) return { ok: false, reason: 'provider_error' };
+      items = (body.value || [])
+        .filter((e) => !e.isCancelled && e.showAs !== 'free')
+        .map((e) => ({
+          title: e.subject || '(busy)',
+          // Graph returns UTC without a zone suffix when asked for UTC.
+          start: e.start?.dateTime ? `${e.start.dateTime.replace(/Z?$/, '')}Z` : null,
+          end: e.end?.dateTime ? `${e.end.dateTime.replace(/Z?$/, '')}Z` : null,
+          all_day: Boolean(e.isAllDay),
+        }));
+    }
+  } catch (err) {
+    log.warn('calendar.read_failed', { provider: access.provider, message: err.message });
+    return { ok: false, reason: 'provider_error' };
+  }
+
+  return {
+    ok: true,
+    provider: access.provider,
+    busy: items.map(({ start: s, end: e }) => ({ start: s, end: e })),
+    events: items,
+  };
+}
+
+module.exports = {
+  PROVIDERS, normaliseProvider, toIana, fetchTimezone, saveConnection, getAccessToken, readEvents,
+};

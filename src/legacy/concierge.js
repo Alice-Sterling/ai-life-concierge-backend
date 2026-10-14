@@ -31,6 +31,7 @@ const dateNightService = require('../services/dateNight');
 const handoffService = require('../services/handoff');
 const usersService = require('../services/users');
 const promptContext = require('../services/promptContext');
+const calendarService = require('../services/calendar');
 
 // This file sits at src/legacy/, so __dirname no longer points at the project
 // root. skills/ and init-db.sql are still resolved relative to the root.
@@ -1276,6 +1277,24 @@ async function checkCalendarAvailability(userId, toolInput) {
   }
 
   const calendarProvider = normalizeCalendarProviderValue(userRow.calendar_provider);
+
+  // First choice: the client's own calendar, read with their own stored token.
+  // Falls through to the Pipedream path below when there is no usable token.
+  const direct = await calendarService.readEvents(userId, start_time, end_time);
+  if (direct.ok) {
+    return JSON.stringify({
+      ok: true,
+      status: 'direct',
+      provider: direct.provider,
+      start_time,
+      end_time,
+      intent: intent || 'availability check',
+      busy: direct.busy,
+      events: direct.events,
+      note: 'Times are ISO 8601 (UTC unless an offset is shown). Any time not covered by busy is free.',
+    });
+  }
+
   const queryUrl = process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK;
 
   if (!queryUrl || !String(queryUrl).trim()) {

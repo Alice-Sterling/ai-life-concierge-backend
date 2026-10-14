@@ -13,7 +13,7 @@
     "migrate:up": "node-pg-migrate up -m db/migrations",
     "migrate:down": "node-pg-migrate down -m db/migrations",
     "test:smoke": "node tests/smoke.cjs",
-    "test": "node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs && node tests/calendar.cjs && node tests/date-night.cjs && node tests/front-door.cjs && node tests/lifecycle.cjs && node tests/context.cjs",
+    "test": "node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs && node tests/calendar.cjs && node tests/date-night.cjs && node tests/front-door.cjs && node tests/lifecycle.cjs && node tests/context.cjs && node tests/calendar-read.cjs",
     "start:legacy": "node index.js",
     "extract:legacy": "node scripts/extract-legacy.cjs",
     "db:apply": "node scripts/apply-sql.cjs",
@@ -23,7 +23,8 @@
     "test:date-night": "node tests/date-night.cjs",
     "test:front-door": "node tests/front-door.cjs",
     "test:lifecycle": "node tests/lifecycle.cjs",
-    "test:context": "node tests/context.cjs"
+    "test:context": "node tests/context.cjs",
+    "test:calendar-read": "node tests/calendar-read.cjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

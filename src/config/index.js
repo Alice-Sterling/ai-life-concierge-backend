@@ -104,6 +104,13 @@ const config = {
     fetchArchitectureProfileToken: str('FETCH_ARCHITECTURE_PROFILE_TOKEN'),
   },
 
+  // The OAuth apps the onboarding flow uses. Needed only to REFRESH a
+  // client's calendar token; reading with a fresh token needs none of this.
+  calendarOAuth: {
+    google: { clientId: str('GOOGLE_CLIENT_ID'), clientSecret: str('GOOGLE_CLIENT_SECRET') },
+    outlook: { clientId: str('MS_CLIENT_ID'), clientSecret: str('MS_CLIENT_SECRET') },
+  },
+
   // Key for credentials held at rest, e.g. calendar OAuth tokens.
   // 32 bytes of hex. Generate with: openssl rand -hex 32
   encryption: { tokenKey: str('TOKEN_ENCRYPTION_KEY') },
