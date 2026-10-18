@@ -25,8 +25,12 @@ const REPEAT_WINDOW_HOURS = 6;
 
 const firstName = (user) => (user?.first_name && user.first_name !== 'Explorer' ? user.first_name : 'there');
 const clientKey = (user) => user?.short_id || user?.client_id || '';
-const withClientId = (base, user) =>
-  `${base}${base.includes('?') ? '&' : '?'}client_id=${encodeURIComponent(clientKey(user))}`;
+const withParam = (base, name, user) =>
+  `${base}${base.includes('?') ? '&' : '?'}${name}=${encodeURIComponent(clientKey(user))}`;
+const withClientId = (base, user) => withParam(base, 'client_id', user);
+// Stripe payment links only carry client_reference_id through to the
+// checkout.session.completed webhook, which is what activates the client.
+const withPaymentRef = (base, user) => withParam(base, 'client_reference_id', user);
 
 /**
  * name      - the template name to register in Twilio / Meta
@@ -73,7 +77,7 @@ const TEMPLATES = {
     text: (u) =>
       `Hello ${firstName(u)}, Alice here. Your lifestyle preferences are now set up. There's just `
       + 'one final step to activate your Founding Membership and complimentary six-month trial.'
-      + (config.gate.paymentUrl ? `\n${withClientId(config.gate.paymentUrl, u)}` : ''),
+      + (config.gate.paymentUrl ? `\n${withPaymentRef(config.gate.paymentUrl, u)}` : ''),
   },
   membership_inactive: {
     name: 'ailc_membership_inactive_v1',

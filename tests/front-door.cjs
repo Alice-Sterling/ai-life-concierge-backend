@@ -115,6 +115,7 @@ const unstubAirtable = () => { airtable.findUserRecord = realLookup; };
   r = await send(onboarded.phone_number, 'Hi');
   check('Onboarded: one final step', r.includes('one final step'), true);
   check('Onboarded: with the payment link', r.includes('pay.example.test'), true);
+  check('payment link carries client_reference_id for Stripe', r.includes('pay.example.test/checkout?client_reference_id='), true);
 
   console.log('\nINACTIVE');
   const inactive = await addUser(5, 'Inactive');

@@ -17,6 +17,13 @@ const SOVEREIGN_NUDGE_MESSAGE = `Architect here. I've been monitoring your reque
 
 /** Register the schedule. Called once from server.js. */
 function start() {
+  // The "30-day Pro Vault trial" offer predates the six-month Founding Member
+  // trial and contradicts it. On by default so a deploy changes nothing;
+  // LEGACY_TRIAL_NUDGE_ENABLED=false turns it off.
+  if (process.env.LEGACY_TRIAL_NUDGE_ENABLED === 'false') {
+    logger.info('cron.nudge_disabled', { reason: 'LEGACY_TRIAL_NUDGE_ENABLED=false' });
+    return null;
+  }
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_WHATSAPP_FROM) {
     logger.warn('cron.nudge_disabled', { reason: 'twilio not configured' });
     return null;
