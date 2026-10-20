@@ -219,14 +219,16 @@ async function syncTask(task, userRecordId, log = logger) {
   const tableRef = config.airtable.tasksTableRef;
   if (!isConfigured() || !tableRef) return null;
 
+  // Field names are the client's Tasks table exactly. "Assigned To" there is a
+  // link to Team Members, so the desk email is not sent: an email string in a
+  // link field makes Airtable reject the whole row.
   const fields = sanitizeFields({
     'Task ID': task.task_id,
-    Summary: task.ai_summary,
+    'AI Summary': task.ai_summary,
     'Source Message': task.source_message,
     Status: task.status,
     Priority: task.priority,
     Category: task.category,
-    'Assigned To': task.assigned_to,
     'Requires Human': Boolean(task.requires_human),
     ...(userRecordId ? { [config.airtable.tasksUserLinkField]: [userRecordId] } : {}),
   });
@@ -235,7 +237,7 @@ async function syncTask(task, userRecordId, log = logger) {
     || (await findRecordId(tableRef, 'Task ID', task.task_id, log));
 
   const res = existing
-    ? await request('PATCH', `${tableUrl(tableRef)}/${existing}`, { body: { fields }, log })
+    ? await request('PATCH', `${tableUrl(tableRef)}/${existing}`, { body: { fields, typecast: true }, log })
     : await request('POST', tableUrl(tableRef), { body: { fields, typecast: true }, log });
 
   if (!res.ok) return null;

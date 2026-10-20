@@ -97,13 +97,11 @@ async function syncToAirtable(task, log = logger) {
       log
     );
     const user = rows[0];
+    // Same lookup as the front door: both ids, then the phone in any format.
     const userRecordId = user
-      ? await airtable.findRecordId(
-          require('../config').config.airtable.userTableRef,
-          'Client ID',
-          user.client_id || user.short_id,
-          log
-        )
+      ? (await airtable.findUserRecord({
+        clientId: [user.short_id, user.client_id], phone: user.phone_number,
+      }, log))?.id || null
       : null;
 
     const recordId = await airtable.syncTask(task, userRecordId, log);

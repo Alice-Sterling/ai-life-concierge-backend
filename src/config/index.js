@@ -74,10 +74,11 @@ const config = {
     // AIRTABLE_TABLE_NAME wins over AIRTABLE_USER_TABLE_ID, matching the
     // precedence the prototype already used.
     userTableRef: str('AIRTABLE_TABLE_NAME') || str('AIRTABLE_USER_TABLE_ID'),
-    tasksTableRef: str('AIRTABLE_TASKS_TABLE_NAME') || str('AIRTABLE_TASKS_TABLE_ID'),
+    // Defaults match the client's base: table "Tasks", link field "Requesting Client".
+    tasksTableRef: str('AIRTABLE_TASKS_TABLE_NAME') || str('AIRTABLE_TASKS_TABLE_ID') || 'Tasks',
     phoneField: str('AIRTABLE_PHONE_FIELD', 'phone_number'),
     // Field on the Tasks table that links back to the user's profile record.
-    tasksUserLinkField: str('AIRTABLE_TASKS_USER_LINK_FIELD', 'User'),
+    tasksUserLinkField: str('AIRTABLE_TASKS_USER_LINK_FIELD', 'Requesting Client'),
   },
 
   email: {
