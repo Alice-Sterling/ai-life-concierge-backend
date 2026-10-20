@@ -134,12 +134,43 @@ async function rejectUnknown(phoneNumber, { requestId = null } = {}, log = logge
   return { text: sent.text, via: sent.via };
 }
 
+/**
+ * Make the WhatsApp account use the Client ID the website gave the client.
+ *
+ * A client who wrote on WhatsApp before (or without) the website got ids
+ * minted by the backend, so Airtable never knew them: every lookup fell back
+ * to the phone, and links built from them (onboarding, payment) pointed at a
+ * Client ID Airtable did not have. Once a record is found, its Client ID
+ * becomes both of the account's ids, and every later lookup and link agrees.
+ *
+ * Skipped, not failed, when another row already holds that id (duplicate
+ * test accounts): the client is still served from the phone match.
+ */
+async function linkAirtableClientId(user, record, log) {
+  const airtableId = String(record?.fields?.['Client ID'] ?? '').trim();
+  if (!airtableId || (user.short_id === airtableId && user.client_id === airtableId)) return;
+  try {
+    await db.query(
+      'UPDATE users SET short_id = $2::varchar, client_id = $2::varchar WHERE id = $1',
+      [user.id, airtableId], log);
+    log.info('gate.client_id_linked', {
+      from_short_id: user.short_id || null, from_client_id: user.client_id || null, to: airtableId,
+    });
+    user.short_id = airtableId;
+    user.client_id = airtableId;
+  } catch (err) {
+    if (err.code !== '23505') throw err;
+    log.warn('gate.client_id_link_skipped', { reason: 'id already used by another account', to: airtableId });
+  }
+}
+
 /** Copy a status changed in Airtable into Postgres. Returns the effective status. */
 async function syncStatus(user, phoneNumber, requestId, log) {
   const record = await lookupAirtable({
-    clientId: user.client_id || user.short_id,
+    clientId: [user.short_id, user.client_id],
     phone: cleanPhone(phoneNumber || user.phone_number),
   }, log);
+  await linkAirtableClientId(user, record, log);
   const fromAirtable = users.normalizePhase(record?.fields?.Status);
 
   if (fromAirtable && fromAirtable !== user.onboarding_phase) {

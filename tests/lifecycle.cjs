@@ -31,6 +31,8 @@ const lifecycle = require('../src/services/lifecycle');
 const dateNight = require('../src/services/dateNight');
 const proactiveReplies = require('../src/services/proactiveReplies');
 const lifecycleJob = require('../src/jobs/lifecycle');
+const airtable = require('../src/integrations/airtable');
+const gateway = require('../src/services/gateway');
 const { createApp } = require('../src/app');
 
 // ---- Twilio stub: records instead of sending
@@ -256,6 +258,41 @@ const countSends = async (id, key) => (await db.query(
   const other = await makeUser({ onboarding_phase: 'Active' });
   check('"skip the starter" with no ping -> ordinary message',
     JSON.stringify(await proactiveReplies.handle(other, 'skip the starter please')), '{}');
+
+  console.log('\nPHONE FORMATS');
+  check('UK national -> international', airtable.phoneDigitVariants('07700 900123')[0], '447700900123');
+  check('whatsapp: prefix and + dropped', airtable.phoneDigitVariants('whatsapp:+447700900123')[0], '447700900123');
+  check('UK number also tried as 07…', airtable.phoneDigitVariants('+44 7700-900123')[1], '07700900123');
+  check('00 prefix', airtable.phoneDigitVariants('0044 7700 900123')[0], '447700900123');
+  check('Airtable formula compares digits only',
+    airtable.phoneMatchFormula('phone_number', '+447700900123').includes("REGEX_REPLACE({phone_number} & '', '[^0-9]', '') = '447700900123'"), true);
+  check('empty phone -> no formula', airtable.phoneMatchFormula('phone_number', ''), null);
+
+  console.log('\nLINKING THE WEBSITE CLIENT ID');
+  const realFind = airtable.findUserRecord;
+  const lk = await makeUser({ short_id: 'Ai-BACKEND1', client_id: 'Ai-BKND01', phone_number: 'whatsapp:+447700900777' });
+  let askedWith = null;
+  airtable.findUserRecord = async (q) => { askedWith = q; return { id: 'rec1', fields: { 'Client ID': 'Ai-WEB123', Status: 'Approved' } }; };
+  config.templates.status_approved = 'HXapproved';
+  const outcome = await gateway.admit(await fresh(lk.id), { phoneNumber: 'whatsapp:+447700900777', incomingText: 'hi' });
+  airtable.findUserRecord = realFind;
+  check('looked up with both backend ids', JSON.stringify(askedWith?.clientId), JSON.stringify(['Ai-BACKEND1', 'Ai-BKND01']));
+  row = await fresh(lk.id);
+  check('short_id now the website id', row.short_id, 'Ai-WEB123');
+  check('client_id now the website id', row.client_id, 'Ai-WEB123');
+  check('status taken from Airtable', row.onboarding_phase, 'Approved');
+  check('stopped at the front door', outcome.halt, true);
+  check('approved template button carries the website id', lastSent().variables?.[2], 'Ai-WEB123');
+
+  const lk2 = await makeUser({ short_id: 'Ai-BACKEND2', client_id: 'Ai-BKND02', phone_number: 'whatsapp:+447700900778' });
+  r = await post('/admin/users/status-changed', { client_id: 'Ai-WEB456', phone: '07700 900778', status: 'Waitlist' });
+  check('Airtable trigger finds "07700 900778" = whatsapp:+447700900778', r.json?.user_id, lk2.id);
+  check('and links the website id', (await fresh(lk2.id)).short_id, 'Ai-WEB456');
+  const dup = await makeUser({ short_id: 'Ai-DUP0001', client_id: 'Ai-DUP01', phone_number: 'whatsapp:+447700900779' });
+  airtable.findUserRecord = async () => ({ id: 'rec2', fields: { 'Client ID': 'Ai-WEB123', Status: 'Waitlist' } });
+  await gateway.admit(await fresh(dup.id), { phoneNumber: 'whatsapp:+447700900779', incomingText: 'hi' });
+  airtable.findUserRecord = realFind;
+  check('id already used by another account -> left alone, no crash', (await fresh(dup.id)).short_id, 'Ai-DUP0001');
 
   console.log('\nFRONT DOOR TEST NUMBERS');
   check('gate is off for everyone', config.gate.enabled, false);

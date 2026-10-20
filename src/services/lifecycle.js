@@ -21,6 +21,7 @@ const { config } = require('../config');
 const users = require('./users');
 const events = require('./events');
 const templates = require('./templates');
+const airtable = require('../integrations/airtable');
 const { logger } = require('../lib/logger');
 
 /** What the brief's Airtable triggers send for each status. */
@@ -53,13 +54,27 @@ async function findUser({ clientId, phone }, log) {
       [String(clientId).trim()], log);
     if (rows[0]) return rows[0];
   }
-  if (phone) {
-    const bare = String(phone).replace(/^whatsapp:/i, '').trim();
+  const variants = airtable.phoneDigitVariants(phone);
+  if (variants.length) {
+    // Digits only on both sides: "07700 900123" in Airtable is "whatsapp:+447700900123" here.
     const { rows } = await db.query(
-      `SELECT * FROM users WHERE phone_number = $1::varchar OR phone_number = 'whatsapp:' || $1::varchar
-        LIMIT 1`,
-      [bare], log);
-    if (rows[0]) return rows[0];
+      `SELECT * FROM users
+        WHERE regexp_replace(phone_number, '[^0-9]', '', 'g') = ANY($1::text[])
+        ORDER BY created_at ASC LIMIT 1`,
+      [variants], log);
+    const user = rows[0];
+    if (user && clientId && user.short_id !== clientId) {
+      // Found by phone with the website's Client ID in hand: link them for good.
+      try {
+        await db.query('UPDATE users SET short_id = $2::varchar, client_id = $2::varchar WHERE id = $1',
+          [user.id, String(clientId).trim()], log);
+        user.short_id = String(clientId).trim();
+        user.client_id = user.short_id;
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+      }
+    }
+    if (user) return user;
   }
   return null;
 }

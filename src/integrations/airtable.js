@@ -92,10 +92,44 @@ async function findRecordId(tableRef, field, value, log = logger) {
 }
 
 /**
- * Find a client's profile row: by Client ID first, then by phone.
+ * The digit strings one phone number can appear as. People type numbers on
+ * the website as "07700 900123", "+44 7700-900123" or "447700900123", and
+ * WhatsApp sends "whatsapp:+447700900123": all of them are the same client.
  *
- * Phone is tried with and without the leading "+", because rows typed in by
- * the web form and rows written by this service do not agree on the format.
+ * @returns {string[]} digits only, international form first
+ */
+function phoneDigitVariants(phone) {
+  let d = String(phone || '').replace(/^whatsapp:/i, '').replace(/\D/g, '');
+  if (!d) return [];
+  if (d.startsWith('00')) d = d.slice(2);
+  // UK national format (07…, 11 digits) is +44 7…
+  if (d.length === 11 && d.startsWith('0')) d = `44${d.slice(1)}`;
+  const out = [d];
+  if (d.startsWith('44') && d.length === 12) out.push(`0${d.slice(2)}`);
+  return out;
+}
+
+/**
+ * Airtable formula matching the phone field on digits only, so spaces, dashes,
+ * brackets and a leading + or 0 in the cell do not stop the match.
+ */
+function phoneMatchFormula(field, phone) {
+  const variants = phoneDigitVariants(phone);
+  if (!variants.length) return null;
+  const cell = `REGEX_REPLACE({${field}} & '', '[^0-9]', '')`;
+  return `OR(${variants.map((v) => `${cell} = '${escapeFormulaString(v)}'`).join(', ')})`;
+}
+
+async function findRecordByPhone(tableRef, field, phone, log = logger) {
+  const formula = phoneMatchFormula(field, phone);
+  if (!formula) return null;
+  const url = `${tableUrl(tableRef)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+  const res = await request('GET', url, { log });
+  return res.ok ? res.data.records?.[0] ?? null : null;
+}
+
+/**
+ * Find a client's profile row: by Client ID first, then by phone (any format).
  *
  * @returns {Promise<{id: string, fields: object}|null>}
  */
@@ -103,19 +137,15 @@ async function findUserRecord({ clientId = null, phone = null } = {}, log = logg
   if (!isConfigured()) return null;
   const tableRef = config.airtable.userTableRef;
 
-  if (clientId) {
-    const byId = await findRecord(tableRef, 'Client ID', clientId, log);
+  for (const id of new Set([].concat(clientId || []).filter(Boolean))) {
+    const byId = await findRecord(tableRef, 'Client ID', id, log);
     if (byId) return byId;
   }
-
-  const clean = phone ? String(phone).replace(/^whatsapp:/i, '').trim() : '';
-  if (!clean) return null;
-  for (const candidate of new Set([clean, clean.replace(/^\+/, ''), `+${clean.replace(/^\+/, '')}`])) {
-    const byPhone = await findRecord(tableRef, config.airtable.phoneField, candidate, log);
-    if (byPhone) return byPhone;
-  }
-  return null;
+  return phone ? findRecordByPhone(tableRef, config.airtable.phoneField, phone, log) : null;
 }
+
+/** Postgres status -> the exact Airtable option ("On boarded" has a space there). */
+const AIRTABLE_STATUS = { Onboarded: 'On boarded' };
 
 /** Drop null and empty values so a partial update cannot blank a populated cell. */
 function sanitizeFields(fields) {
@@ -145,7 +175,7 @@ async function syncUser(user, log = logger) {
     Email: user.email,
     'First Name': user.first_name,
     'Last Name': user.last_name,
-    Status: user.onboarding_phase,
+    Status: AIRTABLE_STATUS[user.onboarding_phase] || user.onboarding_phase,
     'Conversation Mode': user.conversation_mode,
     'Next Date Due': user.next_date_due_at ? new Date(user.next_date_due_at).toISOString() : null,
     'Onboarding Completed At': user.onboarding_completed_at
@@ -156,11 +186,14 @@ async function syncUser(user, log = logger) {
   if (Object.keys(fields).length === 0) return null;
 
   const tableRef = config.airtable.userTableRef;
-  const key = user.client_id || user.short_id;
-  let recordId = key ? await findRecordId(tableRef, 'Client ID', key, log) : null;
-  if (!recordId && user.phone_number) {
-    recordId = await findRecordId(tableRef, config.airtable.phoneField, user.phone_number, log);
-  }
+  // Both ids, then the phone in any format: a miss here used to create a
+  // duplicate row for a client who signed up on the website.
+  const existing = await findUserRecord({
+    clientId: [user.short_id, user.client_id], phone: user.phone_number,
+  }, log);
+  const recordId = existing?.id || null;
+  // Never overwrite the Client ID the website gave an existing row.
+  if (existing?.fields?.['Client ID']) delete fields['Client ID'];
 
   const res = recordId
     ? await request('PATCH', `${tableUrl(tableRef)}/${recordId}`, { body: { fields }, log })
@@ -227,4 +260,7 @@ async function healthCheck() {
   };
 }
 
-module.exports = { isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord, healthCheck };
+module.exports = {
+  isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord,
+  phoneDigitVariants, phoneMatchFormula, healthCheck,
+};
