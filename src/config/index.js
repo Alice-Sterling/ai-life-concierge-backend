@@ -176,6 +176,13 @@ const config = {
     schedule: str('LIFECYCLE_CRON_SCHEDULE', '*/15 * * * *'),
   },
 
+  // /admin/test/* runs the proactive jobs on demand for these users only, so a
+  // live test does not wait a day for a timer. Default: Tim's own account.
+  testTools: {
+    userIds: str('TEST_TOOLS_USER_IDS', '5c8e76ca-60b1-4c2a-8bb7-7e5bf240e16f')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  },
+
   security: {
     rateLimitWindowMs: int('RATE_LIMIT_WINDOW_MS', 60_000),
     rateLimitMax: int('RATE_LIMIT_MAX', 120),

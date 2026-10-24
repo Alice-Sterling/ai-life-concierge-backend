@@ -197,12 +197,13 @@ async function setDateNightCadence(userId, cadenceDays, log = logger) {
 }
 
 /** Users whose next date night has come due. Read by the date-night cron. */
-async function findDueForDateNight({ limit = 100 } = {}, log = logger) {
+async function findDueForDateNight({ limit = 100, userId = null } = {}, log = logger) {
   const { rows } = await db.query(
     `SELECT ${PUBLIC_COLUMNS} FROM users
       WHERE next_date_due_at IS NOT NULL AND next_date_due_at <= NOW()
+        AND ($2::uuid IS NULL OR id = $2::uuid)
       ORDER BY next_date_due_at ASC LIMIT $1`,
-    [Math.min(Number(limit) || 100, 500)], log);
+    [Math.min(Number(limit) || 100, 500), userId], log);
   return rows;
 }
 

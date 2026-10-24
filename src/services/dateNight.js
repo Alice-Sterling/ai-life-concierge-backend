@@ -175,14 +175,19 @@ async function sendPing(user, log) {
   return true;
 }
 
-async function runDueSweep(log = logger, { now = new Date() } = {}) {
-  const due = await users.findDueForDateNight({ limit: 100 }, log);
+/**
+ * @param {object} [opts]
+ * @param {string} [opts.userId]     only this client (the admin test tool)
+ * @param {boolean} [opts.ignoreHour] ping now, not in the client's morning (test tool only)
+ */
+async function runDueSweep(log = logger, { now = new Date(), userId = null, ignoreHour = false } = {}) {
+  const due = await users.findDueForDateNight({ limit: 100, userId }, log);
   const result = { due: due.length, created: 0, pinged: 0, skipped: 0, failed: 0 };
   const pingMode = config.lifecycle.dateNightPing;
 
   for (const u of due) {
     // Pings go out in the client's own morning; until then they simply wait.
-    if (pingMode && localHour(u.active_timezone, now) !== config.lifecycle.dateNightPingHour) {
+    if (pingMode && !ignoreHour && localHour(u.active_timezone, now) !== config.lifecycle.dateNightPingHour) {
       result.skipped += 1;
       continue;
     }

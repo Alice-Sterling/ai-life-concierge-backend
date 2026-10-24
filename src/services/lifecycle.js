@@ -169,10 +169,17 @@ async function onStatusChange({ clientId = null, phone = null, status }, { reque
 }
 
 /**
+ * Every job below takes the same options, used only by the admin test tool:
+ *   userId      run for this one client only
+ *   ignoreWait  treat the wait (24h, 48h, 4h) as already over
+ */
+const waitHours = (hours, { ignoreWait = false } = {}) => (ignoreWait ? 0 : hours);
+
+/**
  * Approved, invited, and still not onboarded a day later: one reminder.
  * "Once" means once per invitation, so a fresh invite earns a fresh reminder.
  */
-async function runOnboardingReminders(log = logger) {
+async function runOnboardingReminders(log = logger, opts = {}) {
   const { rows } = await db.query(
     `SELECT u.*
        FROM users u
@@ -182,12 +189,13 @@ async function runOnboardingReminders(log = logger) {
        ) inv ON inv.invited_at IS NOT NULL
       WHERE u.onboarding_phase = 'Approved'
         AND inv.invited_at < NOW() - make_interval(hours => $1::int)
+        AND ($2::uuid IS NULL OR u.id = $2::uuid)
         AND NOT EXISTS (
           SELECT 1 FROM outbound_messages r
            WHERE r.user_id = u.id AND r.template_key = 'onboarding_reminder'
              AND r.created_at > inv.invited_at)
       LIMIT 100`,
-    [config.lifecycle.onboardingReminderHours], log);
+    [waitHours(config.lifecycle.onboardingReminderHours, opts), opts.userId || null], log);
 
   const result = { due: rows.length, sent: 0, skipped: 0 };
   for (const u of rows) {
@@ -211,7 +219,8 @@ async function runOnboardingReminders(log = logger) {
  * quiet: someone who wrote in the last 24 hours is mid-conversation and is
  * left alone (they are looked at again on the next run).
  */
-async function runHandshakePings(log = logger) {
+async function runHandshakePings(log = logger, opts = {}) {
+  // ignoreWait also skips the "quiet for 24h" rule: the tester has just been chatting.
   const { rows } = await db.query(
     `SELECT u.*
        FROM users u
@@ -219,12 +228,14 @@ async function runHandshakePings(log = logger) {
         AND COALESCE(u.conversation_mode, 'ai') = 'ai'
         AND u.activated_at <= NOW() - make_interval(hours => $1::int)
         AND u.activated_at > NOW() - make_interval(days => $2::int)
+        AND ($3::uuid IS NULL OR u.id = $3::uuid)
         AND NOT EXISTS (SELECT 1 FROM outbound_messages o
                          WHERE o.user_id = u.id AND o.template_key = 'handshake_ping')
-        AND NOT EXISTS (SELECT 1 FROM conversations c
-                         WHERE c.user_id = u.id AND c.timestamp > NOW() - INTERVAL '24 hours')
+        AND ($4::boolean OR NOT EXISTS (SELECT 1 FROM conversations c
+                         WHERE c.user_id = u.id AND c.timestamp > NOW() - INTERVAL '24 hours'))
       LIMIT 100`,
-    [config.lifecycle.handshakeHours, HANDSHAKE_MAX_AGE_DAYS], log);
+    [waitHours(config.lifecycle.handshakeHours, opts), HANDSHAKE_MAX_AGE_DAYS,
+      opts.userId || null, Boolean(opts.ignoreWait)], log);
 
   const result = { due: rows.length, sent: 0, skipped: 0 };
   for (const u of rows) {
@@ -245,7 +256,7 @@ async function runHandshakePings(log = logger) {
  * Only the client's latest exchange counts: any later message from them, a
  * hand-off to a human, or a nudge already sent for that exchange means no.
  */
-async function runProposalNudges(log = logger) {
+async function runProposalNudges(log = logger, opts = {}) {
   const { rows } = await db.query(
     `SELECT u.id, u.first_name, u.phone_number, c.ai_response, c.timestamp AS proposed_at
        FROM users u
@@ -257,11 +268,12 @@ async function runProposalNudges(log = logger) {
         AND c.ai_response IS NOT NULL
         AND c.timestamp <= NOW() - make_interval(hours => $1::int)
         AND c.timestamp > NOW() - INTERVAL '20 hours'
+        AND ($2::uuid IS NULL OR u.id = $2::uuid)
         AND NOT EXISTS (SELECT 1 FROM outbound_messages o
                          WHERE o.user_id = u.id AND o.template_key = 'proposal_nudge'
                            AND o.created_at > c.timestamp)
       LIMIT 200`,
-    [config.lifecycle.proposalNudgeHours], log);
+    [waitHours(config.lifecycle.proposalNudgeHours, opts), opts.userId || null], log);
 
   const result = { candidates: rows.length, sent: 0 };
   for (const r of rows) {

@@ -305,6 +305,57 @@ const countSends = async (id, key) => (await db.query(
   check('a test number goes through the front door', sent.length, beforeGate + 1);
   check('unknown test number gets the invitation', /by invitation/.test(lastSent().body || ''), true);
 
+  console.log('\nADMIN TEST TOOLS');
+  const tim = await makeUser({ onboarding_phase: 'Approved', active_timezone: 'Europe/London',
+    preferences: { date_night: { partner_name: 'Alex' } } });
+  const bystander = await makeUser({ onboarding_phase: 'Approved', date_night_cadence: 14,
+    next_date_due_at: new Date(Date.now() - 3600e3) });
+  config.testTools.userIds = [tim.id];
+  check('not a test account -> 403', (await post(`/admin/test/${bystander.id}/run`, {})).status, 403);
+  check('bad uuid -> 400', (await post('/admin/test/nope/run', {})).status, 400);
+  check('unknown job -> 400', (await post(`/admin/test/${tim.id}/run`, { jobs: ['banana'] })).status, 400);
+  check('no token -> 401', (await post(`/admin/test/${tim.id}/run`, {}, { 'Content-Type': 'application/json' })).status, 401);
+
+  r = await post(`/admin/test/${tim.id}/date-night-due`, { cadence_days: 7 });
+  check('date-night-due -> cadence 7', r.json?.date_night_cadence, 7);
+  check('date-night-due -> due now', new Date(r.json?.next_date_due_at) <= new Date(), true);
+  r = await post(`/admin/test/${tim.id}/date-night-due`, {});
+  check('no cadence given -> keeps 7', r.json?.date_night_cadence, 7);
+
+  // Whatever the hour is now, the test run pings: London9/13 rule is ignored.
+  r = await post(`/admin/test/${tim.id}/run`, { jobs: ['date_night'] });
+  check('date night pinged now, any hour', r.json?.results?.date_night?.pinged, 1);
+  check('date night for the test user only', r.json?.results?.date_night?.due, 1);
+  check('ping went to the test user', lastSent().to, tim.phone_number);
+  check('{{2}} weekly', lastSent().variables?.[2], 'weekly');
+  check('bystander not pinged', await countSends(bystander.id, 'datenight_ping'), 0);
+  check('switches reported', typeof r.json?.switches?.date_night_ping, 'boolean');
+
+  await pastSend(tim.id, 'status_approved', 1);
+  await pastSend(bystander.id, 'status_approved', 1);
+  r = await post(`/admin/test/${tim.id}/run`, { jobs: ['onboarding_reminder'] });
+  check('reminder, invited 1h ago, waits honoured -> nothing', r.json?.results?.onboarding_reminder?.sent, 0);
+  r = await post(`/admin/test/${tim.id}/run`, { jobs: ['onboarding_reminder'], ignore_wait: true });
+  check('reminder with ignore_wait -> sent', r.json?.results?.onboarding_reminder?.sent, 1);
+  check('reminder not sent to bystander', await countSends(bystander.id, 'onboarding_reminder'), 0);
+
+  await db.query("UPDATE users SET onboarding_phase = 'Active', activated_at = NOW() - INTERVAL '1 hour' WHERE id = ANY($1::uuid[])",
+    [[tim.id, bystander.id]]);
+  await wrote(tim.id, 0.1, 'Two ideas:\n1. Sushi at Dinings, 19:00\n2. Pasta at Bocca di Lupo, 20:00');
+  await wrote(bystander.id, 0.1, 'Two ideas:\n1. Sushi at Dinings, 19:00\n2. Pasta at Bocca di Lupo, 20:00');
+  r = await post(`/admin/test/${tim.id}/run`, { jobs: ['handshake_ping', 'proposal_nudge'] });
+  check('handshake, activated 1h ago -> nothing', r.json?.results?.handshake_ping?.sent, 0);
+  check('nudge, options 6 min ago -> nothing', r.json?.results?.proposal_nudge?.sent, 0);
+  r = await post(`/admin/test/${tim.id}/run`, { jobs: ['handshake_ping', 'proposal_nudge'], ignore_wait: true });
+  check('handshake with ignore_wait (even mid-chat) -> sent', r.json?.results?.handshake_ping?.sent, 1);
+  check('nudge with ignore_wait -> sent', r.json?.results?.proposal_nudge?.sent, 1);
+  check('bystander: no handshake', await countSends(bystander.id, 'handshake_ping'), 0);
+  check('bystander: no nudge', await countSends(bystander.id, 'proposal_nudge'), 0);
+  r = await post(`/admin/test/${tim.id}/run`, { ignore_wait: true });
+  check('all jobs again -> nothing repeats',
+    ['onboarding_reminder', 'handshake_ping', 'proposal_nudge'].every((j) => r.json?.results?.[j]?.sent === 0)
+      && r.json?.results?.date_night?.pinged === 0, true);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   server.close();
   await db.pool?.end?.();

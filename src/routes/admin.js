@@ -7,6 +7,8 @@
  *   POST /admin/users/:userId/mode     toggle conversation_mode between ai and human
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
  *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
+ *   POST /admin/test/:userId/date-night-due  make a test user's date night due now
+ *   POST /admin/test/:userId/run             run the proactive jobs now, for that user only
  *
  * JSON only. No HTML dashboard, as specified. Every route sits behind the admin
  * bearer token and a tight rate limit, applied where the router is mounted.
@@ -19,6 +21,9 @@ const conversations = require('../services/conversations');
 const timezone = require('../services/timezone');
 const calendar = require('../services/calendar');
 const lifecycle = require('../services/lifecycle');
+const dateNight = require('../services/dateNight');
+const db = require('../db/pool');
+const { config } = require('../config');
 
 const router = express.Router();
 
@@ -206,6 +211,88 @@ router.post('/users/status-changed', wrap(async (req, res) => {
     return res.status(404).json({ error: 'No user with that client_id or phone', request_id: req.requestId });
   }
   res.json({ ok: true, ...result, request_id: req.requestId });
+}));
+
+/**
+ * Live-test tools. The proactive jobs wait hours or days by design; these run
+ * them now for ONE test account (config.testTools.userIds), so a real phone can
+ * check every message in minutes. Any other user gets 403.
+ */
+const TEST_JOBS = {
+  onboarding_reminder: (log, opts) => lifecycle.runOnboardingReminders(log, opts),
+  handshake_ping: (log, opts) => lifecycle.runHandshakePings(log, opts),
+  proposal_nudge: (log, opts) => lifecycle.runProposalNudges(log, opts),
+  date_night: (log, opts) => dateNight.runDueSweep(log, { userId: opts.userId, ignoreHour: true }),
+};
+
+function testUser(req, res) {
+  const { userId } = req.params;
+  if (!UUID.test(userId)) {
+    res.status(400).json({ error: 'userId must be a UUID', request_id: req.requestId });
+    return null;
+  }
+  if (!config.testTools.userIds.includes(userId.toLowerCase())) {
+    res.status(403).json({ error: 'Not a test account', request_id: req.requestId });
+    return null;
+  }
+  return userId;
+}
+
+/** { cadence_days? } -> date_night_cadence set (default: keep, else 14), next_date_due_at = now. */
+router.post('/test/:userId/date-night-due', wrap(async (req, res) => {
+  const userId = testUser(req, res);
+  if (!userId) return;
+  const cadence = req.body?.cadence_days == null ? null : dateNight.normaliseCadence(req.body.cadence_days);
+  const { rows } = await db.query(
+    `UPDATE users
+        SET date_night_cadence = COALESCE($2::int, date_night_cadence, $3::int),
+            next_date_due_at = NOW()
+      WHERE id = $1
+      RETURNING id, date_night_cadence, next_date_due_at`,
+    [userId, cadence, dateNight.DEFAULT_CADENCE_DAYS], req.log);
+  if (!rows[0]) return res.status(404).json({ error: 'User not found', request_id: req.requestId });
+  res.json({ ok: true, ...rows[0], user_id: rows[0].id, request_id: req.requestId });
+}));
+
+/**
+ * { jobs?: [onboarding_reminder|handshake_ping|proposal_nudge|date_night], ignore_wait? }
+ *
+ * Runs the chosen jobs (default: all) for this user only. The date-night ping
+ * ignores the morning-hour rule; ignore_wait also treats the 24h/48h/4h waits
+ * as over. The feature switches are reported, and a job whose switch is off
+ * still runs: this is how a switch is checked before turning it on.
+ */
+router.post('/test/:userId/run', wrap(async (req, res) => {
+  const userId = testUser(req, res);
+  if (!userId) return;
+  const jobs = req.body?.jobs ?? Object.keys(TEST_JOBS);
+  const unknown = [].concat(jobs).filter((j) => !TEST_JOBS[j]);
+  if (unknown.length) {
+    return res.status(400).json({
+      error: `Unknown job(s): ${unknown.join(', ')}. Expected: ${Object.keys(TEST_JOBS).join(', ')}`,
+      request_id: req.requestId,
+    });
+  }
+
+  const opts = { userId, ignoreWait: req.body?.ignore_wait === true };
+  const results = {};
+  for (const job of [].concat(jobs)) {
+    results[job] = await TEST_JOBS[job](req.log.child({ test_job: job }), opts);
+  }
+  req.log.info('admin.test_run', { user_id: userId, jobs, ignore_wait: opts.ignoreWait });
+  res.json({
+    ok: true,
+    user_id: userId,
+    ignore_wait: opts.ignoreWait,
+    switches: {
+      onboarding_reminder: config.lifecycle.onboardingReminder,
+      handshake_ping: config.lifecycle.handshakePing,
+      proposal_nudge: config.lifecycle.proposalNudge,
+      date_night_ping: config.lifecycle.dateNightPing,
+    },
+    results,
+    request_id: req.requestId,
+  });
 }));
 
 module.exports = router;
