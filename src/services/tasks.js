@@ -56,6 +56,13 @@ async function updateStatus(taskId, status, log = logger) {
   if (!STATUSES.includes(status)) {
     throw Object.assign(new Error(`Invalid task status: ${status}`), { status: 400 });
   }
+  // n8n reports every Airtable status edit, including the ones this service
+  // wrote itself. A status that does not change is a no-op: no Airtable write
+  // (which would be reported again) and no second date-night reschedule.
+  const { rows: current } = await db.query('SELECT * FROM tasks WHERE task_id = $1', [taskId], log);
+  if (!current[0]) return null;
+  if (current[0].status === status) return current[0];
+
   const { rows } = await db.query(
     'UPDATE tasks SET status = $2 WHERE task_id = $1 RETURNING *',
     [taskId, status],
