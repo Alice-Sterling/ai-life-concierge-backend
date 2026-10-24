@@ -29,6 +29,7 @@ const { pool } = require('../db/pool');
 const timezoneService = require('../services/timezone');
 const dateNightService = require('../services/dateNight');
 const handoffService = require('../services/handoff');
+const agentTools = require('../services/agentTools');
 const usersService = require('../services/users');
 const promptContext = require('../services/promptContext');
 const calendarService = require('../services/calendar');
@@ -1714,6 +1715,7 @@ async function getAgentTools(userId, options = {}) {
     SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL,
     timezoneService.SET_TIMEZONE_TOOL,
     handoffService.HANDOFF_TOOL,
+    ...agentTools.definitionsFor(uid),
   ];
 
   if (!composio || options.skipComposio) {
@@ -2018,6 +2020,10 @@ async function getHybridResponseFromMessages(
             } catch (hoErr) {
               payload = JSON.stringify({ ok: false, error: hoErr.message });
             }
+          } else if (agentTools.has(tu.name)) {
+            payload = await agentTools.run(tu.name, tu.input, {
+              userId: composioUserId, sourceMessage: userMessage, requestId: options.requestId || null,
+            });
           } else {
             payload = JSON.stringify({ error: `Unknown tool: ${tu.name}` });
           }
@@ -2302,7 +2308,8 @@ ${options.contextNote}
   const profileBlock = promptContext.profileBlock(user);
   const tasksBlock = await promptContext.tasksBlock(user.id);
   const calendarStatusBlock = promptContext.calendarBlock(user);
-  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${profileBlock}${tasksBlock}${calendarStatusBlock}${lockedOverrideBlock}${calendarToolBlock}${dateNightBlock}${automationIntakeBlock}${proactiveBlock}`;
+  const agentToolsBlock = agentTools.promptBlock(user.id);
+  const finalSystemPrompt = `${buildEliteTriageSystemPrompt(user.active_timezone)}\n\n${dynamicContext}${profileBlock}${tasksBlock}${calendarStatusBlock}${lockedOverrideBlock}${calendarToolBlock}${agentToolsBlock}${dateNightBlock}${automationIntakeBlock}${proactiveBlock}`;
 
   const { vault, web, vaultLowConfidence, vaultBestRank } = await search_vault_and_web(msgText, {
     skipTavily: onboardingPending,

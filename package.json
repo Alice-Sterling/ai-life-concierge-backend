@@ -25,7 +25,8 @@
     "test:lifecycle": "node tests/lifecycle.cjs",
     "test:context": "node tests/context.cjs",
     "test:calendar-read": "node tests/calendar-read.cjs",
-    "test:airtable-sync": "node tests/airtable-sync.cjs"
+    "test:airtable-sync": "node tests/airtable-sync.cjs",
+    "test:flows-unit": "node tests/flows-unit.cjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

@@ -11,8 +11,9 @@
  *                              window, so the gate works before approval.
  *   - no SID, outside       -> cannot send. Logged, not thrown.
  *
- * Variables are numbered from {{1}} in order. Meta rejects gaps, so the brief's
- * {{9}} / {{16}} / {{17}} placeholders are renumbered here.
+ * Variable numbers must match the approved template exactly. Most count from
+ * {{1}}; some were approved with the brief's {{9}} / {{16}} / {{17}} (checked in
+ * Twilio 24 Oct). A wrong number is not an error: Twilio fills in its sample.
  */
 
 const db = require('../db/pool');
@@ -126,6 +127,25 @@ const TEMPLATES = {
       + `your calendar and prepared a few bespoke options for you and ${partnerName(u)}. `
       + "Reply 'Review' to see them, or 'Skip' to skip this week.",
   },
+  // ---- Proactive flows (src/services/proactiveFlows.js) ---------------
+  weekly_briefing: {
+    name: 'ailc_weekly_briefing_ping_v1',
+    // Quick reply buttons: [ Yes, Please ] | [ All Handled ]
+    variables: (u) => ({ 1: firstName(u) }),
+    text: (u) =>
+      `Hello ${firstName(u)}, Alice here. Setting up your week ahead: do you have any client dinners, `
+      + "meetings, or important events coming up where you'd like me to source a venue, handle "
+      + 'reservations, or arrange logistics? Reply to share your plans.',
+  },
+  milestone_ping: {
+    name: 'ailc_milestone_ping_v2',
+    // Quick reply buttons: [ Yes, please ] | [ Pass this time ]
+    // Approved with the brief's numbering: {{9}} = event type (checked in Twilio 24 Oct).
+    variables: (u, d = {}) => ({ 1: firstName(u), 9: d.eventType || 'special occasion' }),
+    text: (u, d = {}) =>
+      `Hello ${firstName(u)}, I've noticed a ${d.eventType || 'special occasion'} coming up in three weeks. `
+      + 'Would you like me to curate a bespoke celebration, or arrange a gift and card?',
+  },
   // Plain text only: it goes out 4 hours after Alice's options, inside the window.
   proposal_nudge: {
     name: null,
@@ -187,15 +207,16 @@ async function inWindow(userId, log = logger) {
  * @param {string} opts.to        phone number, with or without whatsapp:
  * @param {object} [opts.user]    the user row (null for an unknown number)
  * @param {boolean} [opts.inWindow=true] replying to an inbound message?
+ * @param {object} [opts.data]    extra values a template needs besides the user (e.g. eventType)
  * @returns {Promise<{sent: boolean, text: string, via: 'template'|'text'|'inline'|'none'}>}
  *   via 'inline' means Twilio is not configured and the caller should put
  *   `text` in the TwiML response instead.
  */
-async function send(key, { to, user = null, inWindow = true, requestId = null } = {}, log = logger) {
+async function send(key, { to, user = null, inWindow = true, requestId = null, data = {} } = {}, log = logger) {
   const tpl = TEMPLATES[key];
   if (!tpl) throw new Error(`Unknown template: ${key}`);
 
-  const text = tpl.text(user);
+  const text = tpl.text(user, data);
   const sid = config.templates[key];
 
   let via;
@@ -208,7 +229,7 @@ async function send(key, { to, user = null, inWindow = true, requestId = null } 
     ok = true;
   } else if (sid) {
     via = 'template';
-    ok = await twilio.sendTemplate(to, sid, tpl.variables(user), log);
+    ok = await twilio.sendTemplate(to, sid, tpl.variables(user, data), log);
   } else if (inWindow) {
     via = 'text';
     ok = await twilio.sendWhatsApp(to, text, log);

@@ -1,6 +1,7 @@
 /**
  * Lifecycle sweep, every 15 minutes: onboarding reminders, the 48-hour
- * post-activation ping, and the 4-hour nudge on unanswered options.
+ * post-activation ping, the 4-hour nudge on unanswered options, and the
+ * Flow 2 / Flow 3 pings (weekly briefing, milestones).
  *
  * Each part has its own switch (see config.lifecycle) and is skipped while
  * off, so this job can ship before any template is approved.
@@ -9,6 +10,7 @@
 const cron = require('node-cron');
 const { config } = require('../config');
 const lifecycle = require('../services/lifecycle');
+const proactiveFlows = require('../services/proactiveFlows');
 const { logger } = require('../lib/logger');
 
 /** One pass. Exported so tests and the admin can run it on demand. */
@@ -17,6 +19,8 @@ async function runOnce(log = logger) {
     ['onboarding_reminders', config.lifecycle.onboardingReminder, lifecycle.runOnboardingReminders],
     ['handshake_pings', config.lifecycle.handshakePing, lifecycle.runHandshakePings],
     ['proposal_nudges', config.lifecycle.proposalNudge, lifecycle.runProposalNudges],
+    ['weekly_briefings', config.lifecycle.weeklyBriefing, proactiveFlows.runWeeklyBriefings],
+    ['milestone_pings', config.lifecycle.milestonePing, proactiveFlows.runMilestonePings],
   ];
   const results = {};
   for (const [name, enabled, run] of parts) {
@@ -39,6 +43,8 @@ function start() {
     onboarding_reminder: config.lifecycle.onboardingReminder,
     handshake_ping: config.lifecycle.handshakePing,
     proposal_nudge: config.lifecycle.proposalNudge,
+    weekly_briefing: config.lifecycle.weeklyBriefing,
+    milestone_ping: config.lifecycle.milestonePing,
   });
 
   let running = false;

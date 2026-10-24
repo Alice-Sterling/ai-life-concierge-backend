@@ -290,14 +290,53 @@ async function fetchJson(url, headers, log, provider) {
   return res.json();
 }
 
+/** A Google event as readEvents returns it, or null when it should be left out. */
+function mapGoogleEvent(e, { includeFree = false, withLocation = false } = {}) {
+  if (e.status === 'cancelled') return null;
+  const free = e.transparency === 'transparent';
+  if (free && !includeFree) return null;
+  return {
+    title: e.summary || '(busy)',
+    start: e.start?.dateTime || e.start?.date,
+    end: e.end?.dateTime || e.end?.date,
+    all_day: Boolean(e.start?.date && !e.start?.dateTime),
+    ...(includeFree ? { free } : {}),
+    ...(withLocation ? { location: e.location || null } : {}),
+  };
+}
+
+/** An Outlook (Graph) event as readEvents returns it, or null when it should be left out. */
+function mapOutlookEvent(e, { includeFree = false, withLocation = false } = {}) {
+  if (e.isCancelled) return null;
+  const free = e.showAs === 'free';
+  if (free && !includeFree) return null;
+  return {
+    title: e.subject || '(busy)',
+    // Graph returns UTC without a zone suffix when asked for UTC.
+    start: e.start?.dateTime ? `${e.start.dateTime.replace(/Z?$/, '')}Z` : null,
+    end: e.end?.dateTime ? `${e.end.dateTime.replace(/Z?$/, '')}Z` : null,
+    all_day: Boolean(e.isAllDay),
+    ...(includeFree ? { free } : {}),
+    ...(withLocation ? { location: e.location?.displayName || null } : {}),
+  };
+}
+
 /**
  * The client's events between two instants, read with their own token.
- * Titles only: descriptions, attendees and locations never leave the provider.
+ * By default titles and times of busy events only, which is what Alice sees.
  *
+ * The proactive scans (milestones, travel) also need events marked "free"
+ * (birthdays and anniversaries usually are) and the location. Those come back
+ * only when asked for, and are for the scan's own matching: they are never
+ * passed to Alice or stored.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.includeFree=false]  keep events marked free / transparent
+ * @param {boolean} [opts.withLocation=false] add each event's location
  * @returns {Promise<{ok: true, provider, busy: {start,end}[], events: {title,start,end,all_day}[]}
  *                  | {ok: false, reason: string}>}
  */
-async function readEvents(userId, startTime, endTime, log = logger) {
+async function readEvents(userId, startTime, endTime, log = logger, opts = {}) {
   const start = new Date(startTime);
   const end = new Date(endTime);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
@@ -314,37 +353,23 @@ async function readEvents(userId, startTime, endTime, log = logger) {
       const qs = new URLSearchParams({
         timeMin: start.toISOString(), timeMax: end.toISOString(), singleEvents: 'true',
         orderBy: 'startTime', maxResults: String(MAX_EVENTS),
-        fields: 'items(summary,start,end,status,transparency)',
+        fields: `items(summary,start,end,status,transparency${opts.withLocation ? ',location' : ''})`,
       });
       const body = await fetchJson(
         `https://www.googleapis.com/calendar/v3/calendars/primary/events?${qs}`, auth, log, 'google');
       if (!body) return { ok: false, reason: 'provider_error' };
-      items = (body.items || [])
-        .filter((e) => e.status !== 'cancelled' && e.transparency !== 'transparent')
-        .map((e) => ({
-          title: e.summary || '(busy)',
-          start: e.start?.dateTime || e.start?.date,
-          end: e.end?.dateTime || e.end?.date,
-          all_day: Boolean(e.start?.date && !e.start?.dateTime),
-        }));
+      items = (body.items || []).map((e) => mapGoogleEvent(e, opts)).filter(Boolean);
     } else {
       const qs = new URLSearchParams({
         startDateTime: start.toISOString(), endDateTime: end.toISOString(),
-        $select: 'subject,start,end,showAs,isCancelled,isAllDay', $top: String(MAX_EVENTS), $orderby: 'start/dateTime',
+        $select: `subject,start,end,showAs,isCancelled,isAllDay${opts.withLocation ? ',location' : ''}`,
+        $top: String(MAX_EVENTS), $orderby: 'start/dateTime',
       });
       const body = await fetchJson(
         `https://graph.microsoft.com/v1.0/me/calendarView?${qs}`,
         { ...auth, Prefer: 'outlook.timezone="UTC"' }, log, 'outlook');
       if (!body) return { ok: false, reason: 'provider_error' };
-      items = (body.value || [])
-        .filter((e) => !e.isCancelled && e.showAs !== 'free')
-        .map((e) => ({
-          title: e.subject || '(busy)',
-          // Graph returns UTC without a zone suffix when asked for UTC.
-          start: e.start?.dateTime ? `${e.start.dateTime.replace(/Z?$/, '')}Z` : null,
-          end: e.end?.dateTime ? `${e.end.dateTime.replace(/Z?$/, '')}Z` : null,
-          all_day: Boolean(e.isAllDay),
-        }));
+      items = (body.value || []).map((e) => mapOutlookEvent(e, opts)).filter(Boolean);
     }
   } catch (err) {
     log.warn('calendar.read_failed', { provider: access.provider, message: err.message });
@@ -354,11 +379,13 @@ async function readEvents(userId, startTime, endTime, log = logger) {
   return {
     ok: true,
     provider: access.provider,
-    busy: items.map(({ start: s, end: e }) => ({ start: s, end: e })),
+    // "Free" events never count as busy, even when the scan asked for them.
+    busy: items.filter((i) => !i.free).map(({ start: s, end: e }) => ({ start: s, end: e })),
     events: items,
   };
 }
 
 module.exports = {
   PROVIDERS, normaliseProvider, toIana, fetchTimezone, saveConnection, getAccessToken, readEvents,
+  mapGoogleEvent, mapOutlookEvent,
 };

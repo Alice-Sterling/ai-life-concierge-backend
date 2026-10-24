@@ -4,6 +4,13 @@
  *   date-night ping  [ Review Options ] -> short "one moment", then Alice curates
  *                    [ Skip This Week ] -> rescheduled, Alice not called
  *   handshake ping   [ Ready ]          -> Alice writes the week-ahead briefing
+ *   weekly briefing  [ Yes, Please ]    -> canned "tell me who, where, what" (brief's wording)
+ *                    [ All Handled ]    -> canned sign-off, Alice not called
+ *   milestone ping   [ Yes, please ]    -> short "one moment", then Alice proposes 2-3 concepts
+ *                    [ Pass this time ] -> canned reply, Alice not called
+ *
+ * "Yes" is a common word, so for the two newer pings it only counts as a
+ * button answer if nothing else was said since the ping.
  *
  * A word only counts as a button answer shortly after the ping that offered
  * it, so "skip the starter" in an ordinary chat is never read as "skip date night".
@@ -23,8 +30,43 @@ const PING_ANSWER_HOURS = 48;
 const SKIP = /^\s*skip\b/i;
 const REVIEW = /^\s*review\b/i;
 const READY = /^\s*ready\b/i;
+const YES = /^\s*yes\b/i;
+const ALL_HANDLED = /^\s*all\s+handled\b/i;
+const PASS = /^\s*pass\b/i;
 
 const REVIEW_ACK = 'Wonderful. Give me just a moment to cross-reference your calendar with live availability...';
+
+// Flow 2 and 3 wording from the brief.
+const WEEKLY_YES_REPLY = "Wonderful. Tell me who you're meeting, where, and what kind of atmosphere or logistics you need.";
+const WEEKLY_HANDLED_REPLY = "Understood. I'm right here if anything pops up mid-week. Have a brilliant week.";
+const MILESTONE_PASS_REPLY = "Understood, I'll leave this one. If you change your mind, just message me here.";
+const milestoneAck = (type) =>
+  `Wonderful. Give me just a moment to cross-reference our boutique partners and check live availability for ${type} concepts...`;
+
+function milestoneNote(type, date) {
+  return `The client just tapped "Yes, please" on Alice's ping about a ${type}`
+    + `${date ? ` on ${date}` : ''}, about three weeks away. Propose 2-3 specific concepts for it `
+    + '(a celebration dinner, florals delivered on the day, an experience, or a gift and card) that fit '
+    + 'their preferences and city. Verify before you pitch. You may ask one short question if you truly '
+    + `need it (for example whose ${type} it is). When they choose, follow the execution and hand-off protocol.`;
+}
+
+/**
+ * The newest of these pings sent to the client in the last `hours`, if the
+ * client has not said anything since it went out.
+ */
+async function openPing(userId, keys, hours, log) {
+  const { rows } = await db.query(
+    `SELECT o.template_key, o.created_at
+       FROM outbound_messages o
+      WHERE o.user_id = $1 AND o.template_key = ANY($2::text[])
+        AND o.created_at > NOW() - make_interval(hours => $3::int)
+        AND NOT EXISTS (SELECT 1 FROM conversations c
+                         WHERE c.user_id = o.user_id AND c.timestamp > o.created_at)
+      ORDER BY o.created_at DESC LIMIT 1`,
+    [userId, keys, hours], log);
+  return rows[0]?.template_key || null;
+}
 
 function dateNightNote(user) {
   return `The client just tapped "Review Options" on their ${templates.cadenceWord(user)} date-night ping. `
@@ -88,7 +130,39 @@ async function handle(user, incomingText, { requestId = null } = {}, log = logge
     return { contextNote: HANDSHAKE_NOTE };
   }
 
+  if (YES.test(text) || ALL_HANDLED.test(text) || PASS.test(text)) {
+    const ping = await openPing(user.id, ['weekly_briefing', 'milestone_ping'], PING_ANSWER_HOURS, log);
+
+    if (ping === 'weekly_briefing' && (YES.test(text) || ALL_HANDLED.test(text))) {
+      const yes = YES.test(text);
+      await events.record(yes ? 'weekly_briefing_yes' : 'weekly_briefing_all_handled', { userId: user.id, requestId }, log);
+      return { reply: yes ? WEEKLY_YES_REPLY : WEEKLY_HANDLED_REPLY };
+    }
+
+    if (ping === 'milestone_ping' && (YES.test(text) || PASS.test(text))) {
+      const { rows } = await db.query(
+        `SELECT metadata FROM events
+          WHERE user_id = $1 AND event_name = 'milestone_pinged'
+          ORDER BY timestamp DESC LIMIT 1`,
+        [user.id], log);
+      const type = rows[0]?.metadata?.event_type || 'special occasion';
+      const date = rows[0]?.metadata?.event_date
+        ? formatDate(rows[0].metadata.event_date, user.active_timezone) : null;
+
+      if (PASS.test(text)) {
+        await events.record('milestone_passed', { userId: user.id, requestId, metadata: { event_type: type } }, log);
+        return { reply: MILESTONE_PASS_REPLY };
+      }
+      if (twilio.isConfigured()) await twilio.sendWhatsApp(user.phone_number, milestoneAck(type), log);
+      await events.record('milestone_accepted', { userId: user.id, requestId, metadata: { event_type: type } }, log);
+      return { contextNote: milestoneNote(type, date) };
+    }
+  }
+
   return {};
 }
 
-module.exports = { REVIEW_ACK, HANDSHAKE_NOTE, dateNightNote, handle };
+module.exports = {
+  REVIEW_ACK, HANDSHAKE_NOTE, WEEKLY_YES_REPLY, WEEKLY_HANDLED_REPLY, MILESTONE_PASS_REPLY,
+  dateNightNote, milestoneNote, handle,
+};

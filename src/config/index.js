@@ -156,6 +156,9 @@ const config = {
     onboarding_reminder: str('TWILIO_TPL_ONBOARDING_REMINDER'),
     handshake_ping: str('TWILIO_TPL_HANDSHAKE_PING'),
     datenight_ping: str('TWILIO_TPL_DATENIGHT_PING'),
+    // Flow 2 and 3. SIDs are not secret; the defaults are the approved ones (Twilio, 24 Oct).
+    weekly_briefing: str('TWILIO_TPL_WEEKLY_BRIEFING', 'HX99dd6899b50bf20afd3ea632e69db152'),
+    milestone_ping: str('TWILIO_TPL_MILESTONE_PING', 'HXd081fba8e431f93bf9229b86919cf32d'),
   },
 
   // Proactive messages. Each one is off until its template is approved and
@@ -173,7 +176,21 @@ const config = {
     // On: a due date night sends the morning ping. Off: it raises a desk task, as before.
     dateNightPing: bool('DATE_NIGHT_PING_ENABLED', false),
     dateNightPingHour: int('DATE_NIGHT_PING_HOUR', 9),
+    // Flow 2: weekly briefing ping, in the client's own timezone. Day 0 = Sunday.
+    weeklyBriefing: bool('WEEKLY_BRIEFING_ENABLED', false),
+    weeklyBriefingDay: int('WEEKLY_BRIEFING_DAY', 0),
+    weeklyBriefingHour: int('WEEKLY_BRIEFING_HOUR', 18),
+    // Flow 3: milestone ping for birthdays/anniversaries about three weeks ahead.
+    milestonePing: bool('MILESTONE_PING_ENABLED', false),
+    milestonePingHour: int('MILESTONE_PING_HOUR', 10),
+    milestoneDaysAhead: int('MILESTONE_DAYS_AHEAD', 21),
     schedule: str('LIFECYCLE_CRON_SCHEDULE', '*/15 * * * *'),
+  },
+
+  // Alice's agent tools (src/services/agentTools.js). Off for clients until
+  // switched on; the test accounts below always have them.
+  agentTools: {
+    enabled: bool('AGENT_TOOLS_ENABLED', false),
   },
 
   // /admin/test/* runs the proactive jobs on demand for these users only, so a

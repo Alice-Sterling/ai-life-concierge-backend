@@ -22,6 +22,7 @@ const timezone = require('../services/timezone');
 const calendar = require('../services/calendar');
 const lifecycle = require('../services/lifecycle');
 const dateNight = require('../services/dateNight');
+const proactiveFlows = require('../services/proactiveFlows');
 const db = require('../db/pool');
 const { config } = require('../config');
 
@@ -223,6 +224,9 @@ const TEST_JOBS = {
   handshake_ping: (log, opts) => lifecycle.runHandshakePings(log, opts),
   proposal_nudge: (log, opts) => lifecycle.runProposalNudges(log, opts),
   date_night: (log, opts) => dateNight.runDueSweep(log, { userId: opts.userId, ignoreHour: true }),
+  weekly_briefing: (log, opts) => proactiveFlows.runWeeklyBriefings(log, { userId: opts.userId, ignoreHour: true }),
+  // Scans the next 30 days, so a test event can sit on any date.
+  milestones: (log, opts) => proactiveFlows.runMilestonePings(log, { userId: opts.userId, ignoreHour: true, windowDays: 30 }),
 };
 
 function testUser(req, res) {
@@ -289,6 +293,9 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
       handshake_ping: config.lifecycle.handshakePing,
       proposal_nudge: config.lifecycle.proposalNudge,
       date_night_ping: config.lifecycle.dateNightPing,
+      weekly_briefing: config.lifecycle.weeklyBriefing,
+      milestone_ping: config.lifecycle.milestonePing,
+      agent_tools: config.agentTools.enabled,
     },
     results,
     request_id: req.requestId,
