@@ -118,8 +118,9 @@ const TEMPLATES = {
   datenight_ping: {
     name: 'ailc_datenight_ping_v1',
     // Quick reply buttons: [ Review Options ] | [ Skip This Week ]
-    // The brief's {{16}} / {{17}} are {{2}} / {{3}} here (Meta rejects gaps).
-    variables: (u) => ({ 1: firstName(u), 2: cadenceWord(u), 3: partnerName(u) }),
+    // The approved template kept the brief's numbering: {{16}} cadence, {{17}} partner
+    // (checked in Twilio 24 Oct). Sending {{2}}/{{3}} made Twilio fill in its samples.
+    variables: (u) => ({ 1: firstName(u), 16: cadenceWord(u), 17: partnerName(u) }),
     text: (u) =>
       `Hello ${firstName(u)}, it's time for your ${cadenceWord(u)} date night curation! I've reviewed `
       + `your calendar and prepared a few bespoke options for you and ${partnerName(u)}. `

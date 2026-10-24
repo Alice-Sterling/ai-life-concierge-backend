@@ -236,8 +236,8 @@ const countSends = async (id, key) => (await db.query(
   res = await dateNight.runDueSweep(undefined, { now: London9 });
   check('ping mode, 09:30 local -> pinged', res.pinged, 1);
   check('template SID', lastSent().sid, 'HXdatenight');
-  check('{{2}} cadence word', lastSent().variables?.[2], 'fortnightly');
-  check('{{3}} partner name', lastSent().variables?.[3], 'Sam');
+  check('{{16}} cadence word', lastSent().variables?.[16], 'fortnightly');
+  check('{{17}} partner name', lastSent().variables?.[17], 'Sam');
   row = await fresh(dn.id);
   const days = (new Date(row.next_date_due_at) - Date.now()) / 86400e3;
   check('cycle moved on 14 days', days > 13.9 && days < 14.1, true);
@@ -327,7 +327,7 @@ const countSends = async (id, key) => (await db.query(
   check('date night pinged now, any hour', r.json?.results?.date_night?.pinged, 1);
   check('date night for the test user only', r.json?.results?.date_night?.due, 1);
   check('ping went to the test user', lastSent().to, tim.phone_number);
-  check('{{2}} weekly', lastSent().variables?.[2], 'weekly');
+  check('{{16}} weekly', lastSent().variables?.[16], 'weekly');
   check('bystander not pinged', await countSends(bystander.id, 'datenight_ping'), 0);
   check('switches reported', typeof r.json?.switches?.date_night_ping, 'boolean');
 
