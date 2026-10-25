@@ -80,6 +80,79 @@ async function findUser({ clientId, phone }, log) {
 }
 
 /**
+ * The Postgres client for a website Client ID, for callers that only have the
+ * Client ID (the n8n calendar login). Website sign-ups often reach the backend
+ * here first, before they ever write on WhatsApp, so a miss is not the end:
+ *
+ *   1. a user with that client_id / short_id
+ *   2. the Airtable row with that Client ID -> its phone -> a user with that
+ *      phone (digits only). Linked to the website id, unless their current id
+ *      belongs to another Airtable row (duplicate rows for one phone: never
+ *      flip a link back and forth)
+ *   3. no user yet -> created from that Airtable row, like the front door does
+ *
+ * @returns {Promise<object|null>} null when neither Postgres nor Airtable knows the id
+ */
+async function findOrAdoptClient(clientId, log = logger) {
+  const id = String(clientId || '').trim();
+  if (!id) return null;
+
+  const byId = await findUser({ clientId: id }, log);
+  if (byId) return byId;
+
+  const record = await airtable.findUserRecord({ clientId: id }, log);
+  const phone = record?.fields?.[config.airtable.phoneField];
+  const variants = airtable.phoneDigitVariants(phone);
+  if (!variants.length) return null;
+
+  const { rows } = await db.query(
+    `SELECT * FROM users
+      WHERE regexp_replace(phone_number, '[^0-9]', '', 'g') = ANY($1::text[])
+      ORDER BY created_at ASC LIMIT 1`,
+    [variants], log);
+  const user = rows[0];
+  if (user) {
+    const ownIds = [user.short_id, user.client_id].filter(Boolean);
+    const theirRow = ownIds.length ? await airtable.findUserRecord({ clientId: ownIds }, log) : null;
+    if (!theirRow) {
+      try {
+        await db.query('UPDATE users SET short_id = $2::varchar, client_id = $2::varchar WHERE id = $1', [user.id, id], log);
+        user.short_id = id;
+        user.client_id = id;
+        log.info('lifecycle.client_linked', { user_id: user.id, source: 'calendar_connect' });
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+      }
+    }
+    return user;
+  }
+
+  const gateway = require('./gateway');
+  return gateway.adoptFromAirtable(`whatsapp:+${variants[0]}`, null, log);
+}
+
+/**
+ * Activation means the trial has started. The legacy membership check
+ * (concierge.js evaluateTrialMembershipFromAirtable) only grants Founding
+ * Member access when Airtable "Stripe Status" says "Trial Started", and n8n
+ * used to write that at form submission, before payment. Writing it here, at
+ * the real start, lets that early write go. An existing value (e.g. "Trial
+ * Ended") is left alone.
+ */
+async function markTrialStarted(user, log = logger) {
+  if (!airtable.isConfigured()) return false;
+  const record = await airtable.findUserRecord({
+    clientId: [user.short_id, user.client_id], phone: user.phone_number,
+  }, log);
+  if (!record) return false;
+  const current = [].concat(record.fields?.['Stripe Status'] ?? []).filter(Boolean);
+  if (current.length) return false;
+  const ok = await airtable.updateUserRecord(record.id, { 'Stripe Status': 'Trial Started' }, log);
+  if (ok) log.info('lifecycle.trial_started_marked', { user_id: user.id });
+  return ok;
+}
+
+/**
  * The client is now Active: status, start time, and the welcome exactly once.
  *
  * If the welcome cannot be delivered (no template yet, client outside the
@@ -92,6 +165,12 @@ async function activate(user, { source, requestId = null } = {}, log = logger) {
   }
   await db.query(
     'UPDATE users SET activated_at = COALESCE(activated_at, NOW()) WHERE id = $1', [user.id], log);
+  try {
+    await markTrialStarted(user, log);
+  } catch (err) {
+    // Airtable is a mirror: activation goes ahead without it.
+    log.warn('lifecycle.trial_started_mark_failed', { user_id: user.id, message: err.message });
+  }
 
   let welcome = 'already_sent';
   if (await users.claimWelcome(user.id, log)) {
@@ -289,6 +368,8 @@ async function runProposalNudges(log = logger, opts = {}) {
 module.exports = {
   STATUS_CHANGE_TEMPLATE,
   PROPOSAL,
+  findOrAdoptClient,
+  markTrialStarted,
   activate,
   onStatusChange,
   runOnboardingReminders,

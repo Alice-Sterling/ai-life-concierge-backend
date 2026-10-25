@@ -92,5 +92,68 @@ for (const t of agentTools.TOOLS) {
   check(`${t.name}: schema has required fields`, t.input_schema.required.every((r) => r in t.input_schema.properties), true);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+(async () => {
+  // ---- Calendar connect + trial marking, with a fake database and Airtable
+  const db = require('../src/db/pool');
+  const airtable = require('../src/integrations/airtable');
+  const gateway = require('../src/services/gateway');
+  const lifecycle = require('../src/services/lifecycle');
+  const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
+
+  let world;
+  db.query = async (sql, params) => {
+    world.sql.push(sql);
+    if (/client_id = \$1::varchar OR short_id/.test(sql)) return { rows: world.byId ? [world.byId] : [] };
+    if (/regexp_replace\(phone_number/.test(sql)) { world.phoneAsked = params[0]; return { rows: world.byPhone ? [world.byPhone] : [] }; }
+    if (/UPDATE users SET short_id/.test(sql)) { world.linked = params[1]; return { rows: [] }; }
+    return { rows: [] };
+  };
+  airtable.isConfigured = () => true;
+  airtable.findUserRecord = async ({ clientId }) => {
+    const ids = [].concat(clientId || []);
+    return world.records.find((r) => ids.includes(r.fields['Client ID'])) || null;
+  };
+  airtable.updateUserRecord = async (id, fields) => { world.patched = { id, fields }; return true; };
+  gateway.adoptFromAirtable = async (phone) => { world.adopted = phone; return { id: 'new-user' }; };
+  const fresh = (over = {}) => ({ sql: [], records: [], byId: null, byPhone: null, ...over });
+
+  console.log('\nCALENDAR CONNECT: FIND, LINK OR CREATE');
+  world = fresh({ byId: { id: 'u1' } });
+  check('known Client ID -> that user', (await lifecycle.findOrAdoptClient('Ai-WEB1', silent))?.id, 'u1');
+
+  world = fresh({ records: [{ id: 'rec1', fields: { 'Client ID': 'Ai-WEB2', phone_number: '07987 777888' } }],
+    byPhone: { id: 'u2', short_id: 'Ai-OLD2', client_id: 'Ai-OLD2' } });
+  let found = await lifecycle.findOrAdoptClient('Ai-WEB2', silent);
+  check('unknown id -> Airtable phone -> user', found?.id, 'u2');
+  check('phone matched on digits, UK form', world.phoneAsked, ['447987777888', '07987777888']);
+  check('linked to the website id', world.linked, 'Ai-WEB2');
+
+  world = fresh({ records: [
+    { id: 'rec3', fields: { 'Client ID': 'Ai-WEB3', phone_number: '07359259528' } },
+    { id: 'rec4', fields: { 'Client ID': 'Ai-OTHER', phone_number: '07359259528' } }],
+  byPhone: { id: 'u3', short_id: 'Ai-OTHER', client_id: 'Ai-OTHER' } });
+  found = await lifecycle.findOrAdoptClient('Ai-WEB3', silent);
+  check('duplicate rows for one phone -> same user', found?.id, 'u3');
+  check('... but the link is not flipped', world.linked, undefined);
+
+  world = fresh({ records: [{ id: 'rec5', fields: { 'Client ID': 'Ai-WEB5', phone_number: '+44 7700 900555' } }] });
+  found = await lifecycle.findOrAdoptClient('Ai-WEB5', silent);
+  check('nobody with that phone -> created from Airtable', found?.id, 'new-user');
+  check('created with a WhatsApp number', world.adopted, 'whatsapp:+447700900555');
+
+  world = fresh();
+  check('unknown everywhere -> null (404)', await lifecycle.findOrAdoptClient('Ai-NOBODY', silent), null);
+
+  console.log('\nACTIVATION MARKS "TRIAL STARTED"');
+  world = fresh({ records: [{ id: 'rec6', fields: { 'Client ID': 'Ai-T1' } }] });
+  await lifecycle.markTrialStarted({ id: 'u6', short_id: 'Ai-T1' }, silent);
+  check('empty Stripe Status -> Trial Started', world.patched, { id: 'rec6', fields: { 'Stripe Status': 'Trial Started' } });
+  world = fresh({ records: [{ id: 'rec7', fields: { 'Client ID': 'Ai-T2', 'Stripe Status': 'Trial Ended' } }] });
+  await lifecycle.markTrialStarted({ id: 'u7', short_id: 'Ai-T2' }, silent);
+  check('existing value left alone', world.patched, undefined);
+  world = fresh();
+  check('no Airtable row -> nothing', await lifecycle.markTrialStarted({ id: 'u8', short_id: 'Ai-T3' }, silent), false);
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})().catch((err) => { console.error(err); process.exit(1); });

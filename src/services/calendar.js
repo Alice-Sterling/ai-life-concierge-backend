@@ -138,10 +138,11 @@ async function saveConnection(
     ? new Date(Date.now() + seconds * 1000)
     : null;
 
-  const { rows: found } = await db.query(
-    `SELECT id FROM users WHERE client_id = $1::varchar OR short_id = $1::varchar LIMIT 1`, [clientId.trim()], log);
-  if (!found[0]) return null;
-  const userId = found[0].id;
+  // A website sign-up may not be in Postgres yet: found, linked by phone, or
+  // created from Airtable, so the login is never lost (lifecycle.findOrAdoptClient).
+  const client = await require('./lifecycle').findOrAdoptClient(clientId, log);
+  if (!client) return null;
+  const userId = client.id;
 
   const timezone = await fetchTimezone(prov, accessToken, log);
 

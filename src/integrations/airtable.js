@@ -144,6 +144,15 @@ async function findUserRecord({ clientId = null, phone = null } = {}, log = logg
   return phone ? findRecordByPhone(tableRef, config.airtable.phoneField, phone, log) : null;
 }
 
+/** Set some fields on one Clients row. Best-effort like every write here. */
+async function updateUserRecord(recordId, fields, log = logger) {
+  if (!isConfigured() || !recordId) return false;
+  const res = await request('PATCH', `${tableUrl(config.airtable.userTableRef)}/${recordId}`, {
+    body: { fields: sanitizeFields(fields), typecast: true }, log,
+  });
+  return res.ok;
+}
+
 /** Postgres status -> the exact Airtable option ("On boarded" has a space there). */
 const AIRTABLE_STATUS = { Onboarded: 'On boarded' };
 
@@ -263,6 +272,6 @@ async function healthCheck() {
 }
 
 module.exports = {
-  isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord,
+  isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord, updateUserRecord,
   phoneDigitVariants, phoneMatchFormula, healthCheck,
 };
