@@ -183,6 +183,21 @@ for (const t of agentTools.TOOLS) {
   db.query = async (sql) => ({ rows: /INTERVAL '3 minutes'/.test(sql) ? [{ n: 0, oldest: null }] : [] });
   check('all quiet -> no issues', (await alarms.collect({}, silent)).issues, []);
 
+  console.log('\nTRIAL COUNTS FROM ACTIVATION');
+  const legacy = require('../src/legacy/concierge');
+  const daysAgo = (d) => new Date(Date.now() - d * 86400e3);
+  // Tim's real shape: Airtable row from 14 Sep, account 26 Sep, activated 20 Oct.
+  const tim = { trial_start_date: daysAgo(170), created_at: daysAgo(158), activated_at: daysAgo(6), subscription_status: 'FOUNDING_MEMBER' };
+  check('anchor is the activation', legacy.trialAnchor(tim).getTime(), tim.activated_at.getTime());
+  check('day count from activation', legacy.getFoundingMemberWindow(tim).daysSinceEnrollment, 6);
+  const late = { ...tim, trial_start_date: daysAgo(200), activated_at: daysAgo(30) };
+  check('old form date + recent activation -> still Founding Member', legacy.getSubscriptionStatusFromUser(late), 'FOUNDING_MEMBER');
+  const ended = { ...tim, activated_at: daysAgo(181) };
+  check('181 days after activation -> Lite', legacy.getSubscriptionStatusFromUser(ended), 'LITE');
+  const never = { trial_start_date: daysAgo(10), created_at: daysAgo(20), activated_at: null, subscription_status: 'FOUNDING_MEMBER' };
+  check('never activated -> old anchor kept', legacy.getFoundingMemberWindow(never).daysSinceEnrollment, 10);
+  check('no dates at all -> no window', legacy.getFoundingMemberWindow({}).inWindow, false);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((err) => { console.error(err); process.exit(1); });

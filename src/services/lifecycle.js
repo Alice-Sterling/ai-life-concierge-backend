@@ -163,8 +163,11 @@ async function activate(user, { source, requestId = null } = {}, log = logger) {
   if (user.onboarding_phase !== 'Active') {
     await users.setOnboardingPhase(user.id, 'Active', { requestId, fromAirtable: source === 'airtable' }, log);
   }
+  // The 180-day trial counts from the first activation (concierge.js trialAnchor).
   await db.query(
-    'UPDATE users SET activated_at = COALESCE(activated_at, NOW()) WHERE id = $1', [user.id], log);
+    `UPDATE users SET activated_at = COALESCE(activated_at, NOW()),
+                      trial_start_date = COALESCE(activated_at, NOW())
+      WHERE id = $1`, [user.id], log);
   try {
     await markTrialStarted(user, log);
   } catch (err) {

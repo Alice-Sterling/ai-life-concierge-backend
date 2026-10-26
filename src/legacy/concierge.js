@@ -127,9 +127,19 @@ function normalizeSearchQueryText(input) {
   return s;
 }
 
-/** Days since enrollment anchor (trial_start_date or created_at). */
+/**
+ * When the 180-day Founding Member trial started: the activation (Stripe
+ * payment or Airtable -> Active, users.activated_at). Clients never activated
+ * keep the old anchor (Airtable "Created At" via trial_start_date, then the
+ * account's created_at), so nothing changes for them.
+ */
+function trialAnchor(user) {
+  return user?.activated_at ?? user?.trial_start_date ?? user?.created_at ?? null;
+}
+
+/** Days since the trial started (see trialAnchor). */
 function getFoundingMemberWindow(user) {
-  const enrollAnchor = user?.trial_start_date ?? user?.created_at;
+  const enrollAnchor = trialAnchor(user);
   if (!enrollAnchor) return { daysSinceEnrollment: null, inWindow: false };
   const en = new Date(enrollAnchor);
   if (Number.isNaN(en.getTime())) return { daysSinceEnrollment: null, inWindow: false };
@@ -626,7 +636,9 @@ async function syncCalendarFromAirtableForUser(userId, clientId) {
 }
 
 /**
- * Sync trial_start_date from Airtable Created At and membership from Stripe Status multi-select.
+ * Sync trial_start_date and membership (Stripe Status multi-select) from Airtable.
+ * The trial starts at activation (users.activated_at); Airtable "Created At" is
+ * only the fallback for a client who was never activated.
  */
 async function syncUserTrialStatus(userId, clientId) {
   const cid = String(clientId ?? '').trim();
@@ -636,7 +648,9 @@ async function syncUserTrialStatus(userId, clientId) {
   if (!records.length) return null;
 
   const merged = mergeAirtableFieldsFromDuplicates(records);
-  const trialStartDate = extractCreatedAtFromAirtableFields(merged);
+  const airtableCreatedAt = extractCreatedAtFromAirtableFields(merged);
+  const { rows: act } = await pool.query('SELECT activated_at FROM users WHERE id = $1::uuid', [userId]);
+  const trialStartDate = act[0]?.activated_at ? new Date(act[0].activated_at) : airtableCreatedAt;
   const stripeStatusValues = extractStripeStatusFromAirtableFields(merged);
   const evaluation = evaluateTrialMembershipFromAirtable({ trialStartDate, stripeStatusValues });
 
@@ -645,7 +659,8 @@ async function syncUserTrialStatus(userId, clientId) {
       trialStartDate,
       userId,
     ]);
-    console.log('[SYNC] trial_start_date from Airtable Created At:', trialStartDate.toISOString(), 'user:', userId);
+    console.log(`[SYNC] trial_start_date from ${act[0]?.activated_at ? 'activation' : 'Airtable Created At'}:`,
+      trialStartDate.toISOString(), 'user:', userId);
   }
 
   const { rows } = await pool.query('SELECT subscription_status, preferences FROM users WHERE id = $1::uuid', [
@@ -661,7 +676,7 @@ async function syncUserTrialStatus(userId, clientId) {
 
   const prefs = parseUserJsonbObject(rows[0]?.preferences);
   prefs.airtable_stripe_status = stripeStatusValues;
-  prefs.airtable_created_at = trialStartDate ? trialStartDate.toISOString() : null;
+  prefs.airtable_created_at = airtableCreatedAt ? airtableCreatedAt.toISOString() : null;
   await pool.query(`UPDATE users SET preferences = $1::jsonb WHERE id = $2::uuid`, [
     JSON.stringify(prefs),
     userId,
@@ -1888,7 +1903,7 @@ async function sendEmail({ to, subject, text }) {
 async function syncTrialStartDateIfNull(user) {
   if (!user || user.trial_start_date != null) return user;
   const r = await pool.query(
-    `UPDATE users SET trial_start_date = created_at WHERE id = $1 AND trial_start_date IS NULL RETURNING trial_start_date`,
+    `UPDATE users SET trial_start_date = COALESCE(activated_at, created_at) WHERE id = $1 AND trial_start_date IS NULL RETURNING trial_start_date`,
     [user.id]
   );
   if (r.rows[0]) user.trial_start_date = r.rows[0].trial_start_date;
@@ -1897,7 +1912,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone, calendar_connected FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, activated_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone, calendar_connected FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;
@@ -1909,7 +1924,7 @@ async function createNewUser(phoneNumber, profileName) {
   const result = await pool.query(
     `INSERT INTO users (phone_number, first_name, tier, client_id)
      VALUES ($1, $2, 'lite', $3)
-     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone`,
+     RETURNING id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, activated_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone`,
     [phoneNumber, profileName || 'Explorer', generateClientId()]
   );
   const row = result.rows[0];
@@ -2186,7 +2201,7 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const history = await getChatHistory(user.id);
   const displayName = user.first_name || 'Client';
 
-  const trialStart = user.trial_start_date ?? user.created_at;
+  const trialStart = trialAnchor(user);
   const trialDay = calculateTrialDay(trialStart);
   const connectionReport = buildConnectionStatusReport(toolbox.connections);
 
@@ -2471,6 +2486,7 @@ module.exports = {
   getClaudeResponse,
   getEmailTransporter,
   getFoundingMemberWindow,
+  trialAnchor,
   getHybridResponseFromMessages,
   getMasterSkill,
   getPipedreamCalendarAnthropicTools,
