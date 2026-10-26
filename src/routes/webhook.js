@@ -393,6 +393,12 @@ router.post('/webhook', async (req, res) => {
     return res.send(legacy.twimlMessage(replyBody));
   } catch (err) {
     log.error('webhook.failed', { message: err.message, stack: err.stack });
+    // For the alarm email (src/services/alarms.js). Best-effort: when the
+    // database is what failed this cannot be written, and the n8n alarm
+    // reports the failed database check instead.
+    await events.record('webhook_failed', {
+      requestId: req.requestId, metadata: { message: String(err.message || err).slice(0, 500) },
+    }, log);
 
     // Twilio retries on 5xx, which would replay the whole flow. A 200 with a
     // polite message stops the loop; the failure is in the logs and, for

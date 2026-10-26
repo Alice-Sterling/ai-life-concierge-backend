@@ -154,6 +154,35 @@ for (const t of agentTools.TOOLS) {
   world = fresh();
   check('no Airtable row -> nothing', await lifecycle.markTrialStarted({ id: 'u8', short_id: 'Ai-T3' }, silent), false);
 
+  console.log('\nALARMS: LIKELY FIX');
+  const alarms = require('../src/services/alarms');
+  check('DB password', /redeploy the backend/.test(alarms.hintFor('password authentication failed for user "postgres"')), true);
+  check('DB unreachable', /Postgres service/.test(alarms.hintFor('connect ETIMEDOUT fd12::413:5432')), true);
+  check('Anthropic key', /ANTHROPIC_API_KEY/.test(alarms.hintFor('401 {"type":"authentication_error","message":"invalid x-api-key"}')), true);
+  check('calendar expired', /reconnect their calendar/.test(alarms.hintFor('invalid_grant: Token has been expired or revoked')), true);
+  check('unknown -> look up the request id', /request ID/.test(alarms.hintFor('something odd')), true);
+  check('most common hint wins', /Postgres service/.test(alarms.bestHint(['ETIMEDOUT', 'ECONNREFUSED', 'weird'])), true);
+
+  console.log('\nALARMS: REPORT');
+  const q = [];
+  db.query = async (sql, params) => {
+    q.push(params);
+    if (/webhook_failed/.test(sql)) return { rows: [{ timestamp: '2026-10-26T10:00:00Z', request_id: 'r1', error: 'password authentication failed', first_name: 'Sarah' }] };
+    if (/last_error IS NOT NULL/.test(sql)) return { rows: [] };
+    if (/received_at < NOW\(\) - INTERVAL '3 minutes'/.test(sql)) return { rows: [{ n: 2, oldest: '2026-10-26T09:50:00Z' }] };
+    if (/FROM outbound_messages/.test(sql)) return { rows: [{ kind: 'reply', n: 3, last_at: 'x', error_code: null, error_message: null, last_client: 'Jon' }] };
+    if (/FROM automation_logs/.test(sql)) return { rows: [] };
+    return { rows: [] };
+  };
+  const report = await alarms.collect({ sinceMinutes: '10' }, silent);
+  check('report lists the problems found', report.issues.map((i) => i.key), ['webhook_failed', 'message_stuck', 'send_failed']);
+  check('crash: critical, with the DB fix', [report.issues[0].severity, /redeploy/.test(report.issues[0].fix)], ['critical', true]);
+  check('crash example has client and request id, no message text', report.issues[0].examples[0], { at: '2026-10-26T10:00:00Z', client: 'Sarah', request_id: 'r1', error: 'password authentication failed' });
+  check('window passed to SQL', q[0], [10]);
+  check('silly window clamped', (await alarms.collect({ sinceMinutes: 'abc' }, silent)).since_minutes, 6);
+  db.query = async (sql) => ({ rows: /INTERVAL '3 minutes'/.test(sql) ? [{ n: 0, oldest: null }] : [] });
+  check('all quiet -> no issues', (await alarms.collect({}, silent)).issues, []);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((err) => { console.error(err); process.exit(1); });

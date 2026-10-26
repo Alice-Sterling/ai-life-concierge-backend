@@ -7,6 +7,7 @@
  *   POST /admin/users/:userId/mode     toggle conversation_mode between ai and human
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
  *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
+ *   GET  /admin/alarms                 what failed recently, with a likely fix (read by the n8n alarm)
  *   POST /admin/test/:userId/date-night-due  make a test user's date night due now
  *   POST /admin/test/:userId/run             run the proactive jobs now, for that user only
  *
@@ -23,6 +24,7 @@ const calendar = require('../services/calendar');
 const lifecycle = require('../services/lifecycle');
 const dateNight = require('../services/dateNight');
 const proactiveFlows = require('../services/proactiveFlows');
+const alarms = require('../services/alarms');
 const db = require('../db/pool');
 const { config } = require('../config');
 
@@ -212,6 +214,15 @@ router.post('/users/status-changed', wrap(async (req, res) => {
     return res.status(404).json({ error: 'No user with that client_id or phone', request_id: req.requestId });
   }
   res.json({ ok: true, ...result, request_id: req.requestId });
+}));
+
+/**
+ * What failed in the last `since_minutes` (default 6), each with a likely fix.
+ * Answering at all proves the backend and its database are up.
+ */
+router.get('/alarms', wrap(async (req, res) => {
+  const report = await alarms.collect({ sinceMinutes: req.query.since_minutes }, req.log);
+  res.json({ ...report, request_id: req.requestId });
 }));
 
 /**
