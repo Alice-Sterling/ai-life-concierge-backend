@@ -3,6 +3,7 @@
  *
  *   Flow 2 runWeeklyBriefings()  Sunday 18:00 (client's time): "any client dinners or events this week?"
  *   Flow 3 runMilestonePings()   a birthday / anniversary in the calendar about three weeks ahead
+ *   Flow 4 runTransitPings()     a flight in the calendar up to 14 days ahead: "uber, or rail?"
  *
  * Both run inside the 15-minute lifecycle job, each behind its own switch,
  * and send through templates.send() so outbound_messages is the record of
@@ -19,6 +20,7 @@ const { config } = require('../config');
 const templates = require('./templates');
 const events = require('./events');
 const calendar = require('./calendar');
+const flights = require('./flights');
 const { logger } = require('../lib/logger');
 
 const DAY_MS = 86400e3;
@@ -184,6 +186,85 @@ async function runMilestonePings(log = logger, {
   return result;
 }
 
+/**
+ * Flow 4 part 1. Active clients with a connected calendar: a flight from
+ * tomorrow up to TRANSIT_DAYS_AHEAD days out -> ailc_transit_ping_v2
+ * ("traveling to {{18}} on {{10}}: an uber, or rail?"). One ping per flight,
+ * at most one transit ping per client per day. The flight details (number,
+ * destination, departure time and airport) are stored with the ping so the
+ * [Uber] answer can give Alice what she needs; the event title is not.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.userId]     only this client (admin test tool)
+ * @param {boolean} [opts.ignoreHour] run now, not at the configured local hour (test tool only)
+ */
+async function runTransitPings(log = logger, { userId = null, ignoreHour = false, now = new Date() } = {}) {
+  const { rows } = await db.query(
+    `SELECT u.*
+       FROM users u
+      WHERE u.onboarding_phase = 'Active'
+        AND COALESCE(u.conversation_mode, 'ai') = 'ai'
+        AND u.calendar_connected = true
+        AND ($1::uuid IS NULL OR u.id = $1::uuid)
+        AND NOT EXISTS (SELECT 1 FROM outbound_messages o
+                         WHERE o.user_id = u.id AND o.template_key = 'transit_ping'
+                           AND o.created_at > NOW() - INTERVAL '20 hours')
+      LIMIT 200`,
+    [userId], log);
+
+  // From "now" so a flight later today is still offered a car; up to N days out.
+  const from = now;
+  const to = new Date(now.getTime() + config.lifecycle.transitDaysAhead * DAY_MS);
+
+  const result = { candidates: rows.length, scanned: 0, found: 0, sent: 0, skipped: 0, failed: 0 };
+  for (const u of rows) {
+    if (!ignoreHour && localDayHour(u.active_timezone, now).hour !== config.lifecycle.transitPingHour) continue;
+    const userLog = log.child({ user_id: u.id });
+
+    const cal = await calendar.readEvents(u.id, from, to, userLog, { includeFree: true, withLocation: true });
+    if (!cal.ok) { result.failed += 1; userLog.warn('flows.transit_scan_failed', { reason: cal.reason }); continue; }
+    result.scanned += 1;
+
+    let pick = null;
+    for (const ev of cal.events) {
+      const flight = flights.detectFlight(ev);
+      if (!flight) continue;
+      const key = eventKey(ev);
+      const { rows: seen } = await db.query(
+        `SELECT 1 FROM events
+          WHERE user_id = $1 AND event_name = 'transit_pinged' AND metadata->>'event_key' = $2::text
+          LIMIT 1`,
+        [u.id, key], userLog);
+      if (!seen.length) { pick = { ...flight, key, start: ev.start, allDay: Boolean(ev.all_day) }; break; }
+    }
+    if (!pick) continue;
+    result.found += 1;
+
+    const inWindow = await templates.inWindow(u.id, userLog);
+    if (!config.templates.transit_ping && !inWindow) { result.skipped += 1; continue; }
+    const date = flights.ordinalDate(pick.start, u.active_timezone);
+    const sent = await templates.send('transit_ping', {
+      to: u.phone_number, user: u, inWindow, data: { destination: pick.destination || pick.flight, date },
+    }, userLog);
+    if (sent.sent) {
+      result.sent += 1;
+      await events.record('transit_pinged', {
+        userId: u.id,
+        metadata: {
+          event_key: pick.key,
+          flight: pick.flight,
+          destination: pick.destination,
+          from_airport: pick.from,
+          departs: pick.allDay ? String(pick.start).slice(0, 10) : pick.start,
+          via: sent.via,
+        },
+      }, userLog);
+    }
+  }
+  log.info('flows.transit_pings_done', result);
+  return result;
+}
+
 module.exports = {
-  MILESTONES, detectMilestone, localDayHour, eventKey, runWeeklyBriefings, runMilestonePings,
+  MILESTONES, detectMilestone, localDayHour, eventKey, runWeeklyBriefings, runMilestonePings, runTransitPings,
 };

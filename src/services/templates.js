@@ -146,6 +146,15 @@ const TEMPLATES = {
       `Hello ${firstName(u)}, I've noticed a ${d.eventType || 'special occasion'} coming up in three weeks. `
       + 'Would you like me to curate a bespoke celebration, or arrange a gift and card?',
   },
+  transit_ping: {
+    name: 'ailc_transit_ping_v2',
+    // Quick reply buttons: [ Uber ] | [ All Handled ] | [ Rail ]
+    // Approved with {{1}} name, {{18}} destination, {{10}} date ("5th of April") (Twilio, 31 Oct).
+    variables: (u, d = {}) => ({ 1: firstName(u), 18: d.destination || 'your destination', 10: d.date || 'soon' }),
+    text: (u, d = {}) =>
+      `Hello ${firstName(u)}. I see you are traveling to ${d.destination || 'your destination'} on ${d.date || 'soon'}. `
+      + 'Would you like me to arrange an uber, or secure rail tickets?',
+  },
   // Plain text only: it goes out 4 hours after Alice's options, inside the window.
   proposal_nudge: {
     name: null,

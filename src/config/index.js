@@ -171,6 +171,8 @@ const config = {
     // Flow 2 and 3. SIDs are not secret; the defaults are the approved ones (Twilio, 24 Oct).
     weekly_briefing: str('TWILIO_TPL_WEEKLY_BRIEFING', 'HX99dd6899b50bf20afd3ea632e69db152'),
     milestone_ping: str('TWILIO_TPL_MILESTONE_PING', 'HXd081fba8e431f93bf9229b86919cf32d'),
+    // Flow 4: ailc_transit_ping_v2, approved (Twilio Content API, 31 Oct).
+    transit_ping: str('TWILIO_TPL_TRANSIT_PING', 'HX4585f83226549166e9c89c4e73a9630d'),
   },
 
   // Proactive messages. Each one is off until its template is approved and
@@ -196,6 +198,10 @@ const config = {
     milestonePing: bool('MILESTONE_PING_ENABLED', false),
     milestonePingHour: int('MILESTONE_PING_HOUR', 10),
     milestoneDaysAhead: int('MILESTONE_DAYS_AHEAD', 21),
+    // Flow 4 part 1: a flight in the calendar up to 14 days ahead -> transit ping.
+    transitPing: bool('TRANSIT_PING_ENABLED', false),
+    transitPingHour: int('TRANSIT_PING_HOUR', 10),
+    transitDaysAhead: int('TRANSIT_DAYS_AHEAD', 14),
     schedule: str('LIFECYCLE_CRON_SCHEDULE', '*/15 * * * *'),
   },
 

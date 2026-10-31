@@ -75,6 +75,36 @@ check('milestone ping off', config.lifecycle.milestonePing, false);
 check('agent tools off', config.agentTools.enabled, false);
 check('Sunday 18:00 by default', [config.lifecycle.weeklyBriefingDay, config.lifecycle.weeklyBriefingHour], [0, 18]);
 check('21 days ahead by default', config.lifecycle.milestoneDaysAhead, 21);
+check('transit ping off, 10:00, 14 days ahead', [config.lifecycle.transitPing, config.lifecycle.transitPingHour, config.lifecycle.transitDaysAhead], [false, 10, 14]);
+
+console.log('\nFLOW 4: FLIGHTS IN THE CALENDAR');
+const flightsSvc = require('../src/services/flights');
+const replies = require('../src/services/proactiveReplies');
+const fl = (title, location = null) => flightsSvc.detectFlight({ title, location });
+check('Gmail flight event', fl('Flight to Dubai (EK 2)', 'London LHR'), { flight: 'EK2', destination: 'Dubai', from: 'LHR' });
+check('typed flight number + route', fl('BA117 LHR-JFK'), { flight: 'BA117', destination: 'New York', from: 'LHR' });
+check('arrow route, space in number', fl('EK 2 LHR → DXB'), { flight: 'EK2', destination: 'Dubai', from: 'LHR' });
+check('"Flight LHR to NCE" without a number', fl('Flight LHR to NCE'), { flight: null, destination: 'Nice', from: 'LHR' });
+check('"Flight to New York" (end of title)', fl('Flight to New York').destination, 'New York');
+check('unknown airport code shown as the code', fl('VS3 LHR-XYZ').destination, 'XYZ');
+check('number only, no place', fl('Board review then BA432'), { flight: 'BA432', destination: null, from: null });
+check('not a flight: "Q3 2026 planning"', fl('Q3 2026 planning'), null);
+check('not a flight: "M25 traffic"', fl('Drive via M25 2pm'), null);
+check('not a flight: "Book flight for mum"', fl('Book flight for mum'), null);
+check('not a flight: dinner', fl('Dinner at Zuma'), null);
+check('{{10}} as approved: "5th of April"', flightsSvc.ordinalDate('2026-04-05T09:00:00Z', 'Europe/London'), '5th of April');
+check('{{10}} 1st / 22nd / 13th', ['2026-11-01', '2026-11-22', '2026-11-13'].map((d) => flightsSvc.ordinalDate(`${d}T12:00:00Z`)), ['1st of November', '22nd of November', '13th of November']);
+check('{{10}} in the client timezone', flightsSvc.ordinalDate('2026-11-06T22:30:00Z', 'Asia/Dubai'), '7th of November');
+check('{{10}} bad timezone falls back to London', flightsSvc.ordinalDate('2026-11-06T12:00:00Z', 'Nope/Nope'), '6th of November');
+check('transit template numbers as approved {{1}} {{18}} {{10}}', templates.TEMPLATES.transit_ping.variables(u, { destination: 'Dubai', date: '6th of November' }), { 1: 'Tim', 18: 'Dubai', 10: '6th of November' });
+check('transit SID default (approved one)', config.templates.transit_ping, 'HX4585f83226549166e9c89c4e73a9630d');
+check('transit plain-text twin', templates.TEMPLATES.transit_ping.text(u, { destination: 'Dubai', date: '6th of November' }),
+  'Hello Tim. I see you are traveling to Dubai on 6th of November. Would you like me to arrange an uber, or secure rail tickets?');
+const meta = { flight: 'EK2', destination: 'Dubai', from_airport: 'LHR', departs: '2026-11-06T08:40:00Z' };
+check('flight line for Alice', replies.flightLine(meta, 'Europe/London'), 'flight EK2 to Dubai from LHR departing Friday 6 November at 08:40');
+check('flight line, all-day event', replies.flightLine({ ...meta, departs: '2026-11-06' }), 'flight EK2 to Dubai from LHR departing Friday 6 November');
+check('[Uber] note: pickup time + request_transit + Schedule', [/request_transit/, /Schedule/, /3 hours before/].every((re) => re.test(replies.transitUberNote(meta, 'Europe/London'))), true);
+check('[Rail] note: hand to the desk', /handoff_to_concierge/.test(replies.transitRailNote(meta, 'Europe/London')), true);
 
 console.log('\nAGENT TOOLS');
 const stranger = '00000000-0000-4000-8000-000000000000';

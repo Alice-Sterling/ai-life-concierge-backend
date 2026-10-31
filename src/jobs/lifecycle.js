@@ -1,7 +1,7 @@
 /**
  * Lifecycle sweep, every 15 minutes: onboarding reminders, the 48-hour
  * post-activation ping, the 4-hour nudge on unanswered options, and the
- * Flow 2 / Flow 3 pings (weekly briefing, milestones).
+ * Flow 2 / 3 / 4 pings (weekly briefing, milestones, transit for a flight).
  *
  * Each part has its own switch (see config.lifecycle) and is skipped while
  * off, so this job can ship before any template is approved.
@@ -21,6 +21,7 @@ async function runOnce(log = logger) {
     ['proposal_nudges', config.lifecycle.proposalNudge, lifecycle.runProposalNudges],
     ['weekly_briefings', config.lifecycle.weeklyBriefing, proactiveFlows.runWeeklyBriefings],
     ['milestone_pings', config.lifecycle.milestonePing, proactiveFlows.runMilestonePings],
+    ['transit_pings', config.lifecycle.transitPing, proactiveFlows.runTransitPings],
   ];
   const results = {};
   for (const [name, enabled, run] of parts) {
@@ -45,6 +46,7 @@ function start() {
     proposal_nudge: config.lifecycle.proposalNudge,
     weekly_briefing: config.lifecycle.weeklyBriefing,
     milestone_ping: config.lifecycle.milestonePing,
+    transit_ping: config.lifecycle.transitPing,
   });
 
   let running = false;

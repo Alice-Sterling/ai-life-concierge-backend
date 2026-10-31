@@ -238,6 +238,8 @@ const TEST_JOBS = {
   weekly_briefing: (log, opts) => proactiveFlows.runWeeklyBriefings(log, { userId: opts.userId, ignoreHour: true }),
   // Scans the next 30 days, so a test event can sit on any date.
   milestones: (log, opts) => proactiveFlows.runMilestonePings(log, { userId: opts.userId, ignoreHour: true, windowDays: 30 }),
+  // Flow 4: a flight in the next TRANSIT_DAYS_AHEAD days -> the transit ping.
+  transit: (log, opts) => proactiveFlows.runTransitPings(log, { userId: opts.userId, ignoreHour: true }),
 };
 
 function testUser(req, res) {
@@ -306,6 +308,7 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
       date_night_ping: config.lifecycle.dateNightPing,
       weekly_briefing: config.lifecycle.weeklyBriefing,
       milestone_ping: config.lifecycle.milestonePing,
+      transit_ping: config.lifecycle.transitPing,
       agent_tools: config.agentTools.enabled,
     },
     results,

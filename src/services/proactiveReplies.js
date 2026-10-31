@@ -8,6 +8,9 @@
  *                    [ All Handled ]    -> canned sign-off, Alice not called
  *   milestone ping   [ Yes, please ]    -> short "one moment", then Alice proposes 2-3 concepts
  *                    [ Pass this time ] -> canned reply, Alice not called
+ *   transit ping     [ Uber ]           -> Alice proposes a pickup time and sends the Uber link
+ *                    [ Rail ]           -> Alice takes the details and hands rail to the desk
+ *                    [ All Handled ]    -> canned reply, Alice not called
  *
  * "Yes" is a common word, so for the two newer pings it only counts as a
  * button answer if nothing else was said since the ping.
@@ -33,6 +36,8 @@ const READY = /^\s*ready\b/i;
 const YES = /^\s*yes\b/i;
 const ALL_HANDLED = /^\s*all\s+handled\b/i;
 const PASS = /^\s*pass\b/i;
+const UBER = /^\s*uber\b/i;
+const RAIL = /^\s*rail\b/i;
 
 const REVIEW_ACK = 'Wonderful. Give me just a moment to cross-reference your calendar with live availability...';
 
@@ -49,6 +54,47 @@ function milestoneNote(type, date) {
     + '(a celebration dinner, florals delivered on the day, an experience, or a gift and card) that fit '
     + 'their preferences and city. Verify before you pitch. You may ask one short question if you truly '
     + `need it (for example whose ${type} it is). When they choose, follow the execution and hand-off protocol.`;
+}
+
+const TRANSIT_HANDLED_REPLY = "Understood. Have a wonderful trip, and I'm right here if anything changes.";
+
+/** One line about the flight from the stored ping, in the client's timezone. */
+function flightLine(meta = {}, tz) {
+  let when = null;
+  if (meta.departs) {
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(meta.departs);
+    try {
+      when = new Date(meta.departs).toLocaleString('en-GB', {
+        weekday: 'long', day: 'numeric', month: 'long',
+        ...(dateOnly ? {} : { hour: '2-digit', minute: '2-digit' }),
+        timeZone: dateOnly ? 'UTC' : (tz || 'Europe/London'),
+      });
+    } catch {
+      when = String(meta.departs);
+    }
+  }
+  return [
+    meta.flight ? `flight ${meta.flight}` : 'a flight',
+    meta.destination ? `to ${meta.destination}` : null,
+    meta.from_airport ? `from ${meta.from_airport}` : null,
+    when ? `departing ${when}` : null,
+  ].filter(Boolean).join(' ');
+}
+
+function transitUberNote(meta, tz) {
+  return `The client just tapped "Uber" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar). `
+    + 'Arrange the ride to the departure airport: propose a pickup time (about 3 hours before an international '
+    + 'departure, 2 hours before a domestic one) and ask only for what you do not know yet (normally the pickup '
+    + 'address). Then call request_transit with the pickup address and the departure airport and terminal as '
+    + 'the drop-off, send the link, remind them to tap "Schedule" in Uber for that time, and offer that the '
+    + 'team can book it for them instead.';
+}
+
+function transitRailNote(meta, tz) {
+  return `The client just tapped "Rail" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar). `
+    + 'Rail tickets are booked by the concierge team. Confirm in one short message the station or address they '
+    + 'travel from and when they want to arrive at the airport (suggest a time), then call handoff_to_concierge '
+    + 'with the full journey details.';
 }
 
 /**
@@ -130,8 +176,26 @@ async function handle(user, incomingText, { requestId = null } = {}, log = logge
     return { contextNote: HANDSHAKE_NOTE };
   }
 
-  if (YES.test(text) || ALL_HANDLED.test(text) || PASS.test(text)) {
-    const ping = await openPing(user.id, ['weekly_briefing', 'milestone_ping'], PING_ANSWER_HOURS, log);
+  if (YES.test(text) || ALL_HANDLED.test(text) || PASS.test(text) || UBER.test(text) || RAIL.test(text)) {
+    const ping = await openPing(user.id, ['weekly_briefing', 'milestone_ping', 'transit_ping'], PING_ANSWER_HOURS, log);
+
+    if (ping === 'transit_ping' && (UBER.test(text) || RAIL.test(text) || ALL_HANDLED.test(text))) {
+      if (ALL_HANDLED.test(text)) {
+        await events.record('transit_all_handled', { userId: user.id, requestId }, log);
+        return { reply: TRANSIT_HANDLED_REPLY };
+      }
+      const { rows } = await db.query(
+        `SELECT metadata FROM events
+          WHERE user_id = $1 AND event_name = 'transit_pinged'
+          ORDER BY timestamp DESC LIMIT 1`,
+        [user.id], log);
+      const meta = rows[0]?.metadata || {};
+      const rail = RAIL.test(text);
+      await events.record(rail ? 'transit_rail_requested' : 'transit_uber_requested', {
+        userId: user.id, requestId, metadata: { flight: meta.flight || null },
+      }, log);
+      return { contextNote: rail ? transitRailNote(meta, user.active_timezone) : transitUberNote(meta, user.active_timezone) };
+    }
 
     if (ping === 'weekly_briefing' && (YES.test(text) || ALL_HANDLED.test(text))) {
       const yes = YES.test(text);
@@ -163,6 +227,6 @@ async function handle(user, incomingText, { requestId = null } = {}, log = logge
 }
 
 module.exports = {
-  REVIEW_ACK, HANDSHAKE_NOTE, WEEKLY_YES_REPLY, WEEKLY_HANDLED_REPLY, MILESTONE_PASS_REPLY,
-  dateNightNote, milestoneNote, handle,
+  REVIEW_ACK, HANDSHAKE_NOTE, WEEKLY_YES_REPLY, WEEKLY_HANDLED_REPLY, MILESTONE_PASS_REPLY, TRANSIT_HANDLED_REPLY,
+  dateNightNote, milestoneNote, flightLine, transitUberNote, transitRailNote, handle,
 };
