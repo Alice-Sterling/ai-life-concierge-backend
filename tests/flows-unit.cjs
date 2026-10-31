@@ -111,6 +111,50 @@ check('[Uber] note: new trip, nothing reused', /do not reuse any address/.test(u
 check('[Uber] note: London airport -> London time even for a Dubai-based client', /05:40/.test(replies.transitUberNote(meta, 'Asia/Dubai')), true);
 check('[Uber] note: unknown airport -> client timezone', /09:40/.test(replies.transitUberNote({ ...meta, from_airport: 'XYZ' }, 'Asia/Dubai')), true);
 check('airport timezone', [flightsSvc.airportTimezone('LHR'), flightsSvc.airportTimezone('DXB'), flightsSvc.airportTimezone('XYZ')], ['Europe/London', 'Asia/Dubai', null]);
+
+console.log('\nFLOW 6: TRIPS IN THE CALENDAR');
+const tripsSvc = require('../src/services/trips');
+const promptContext = require('../src/services/promptContext');
+const geocodeMod = require('../src/integrations/geocode');
+const allDay = (title, start, end, location = null) => ({ title, start, end, all_day: true, location });
+check('travel ping off, 11:00, 14 days ahead', [config.lifecycle.travelPing, config.lifecycle.travelPingHour, config.lifecycle.travelDaysAhead], [false, 11, 14]);
+check('multi-day: all-day 3 days', tripsSvc.isMultiDay(allDay('Rome', '2026-11-10', '2026-11-13')), true);
+check('not multi-day: one all-day day', tripsSvc.isMultiDay(allDay("Mum's birthday", '2026-11-10', '2026-11-11')), false);
+check('multi-day: timed 2 nights', tripsSvc.isMultiDay({ start: '2026-11-10T09:00:00Z', end: '2026-11-12T18:00:00Z' }), true);
+check('not multi-day: a 3-hour meeting', tripsSvc.isMultiDay({ start: '2026-11-10T09:00:00Z', end: '2026-11-10T12:00:00Z' }), false);
+check('airport code in title -> city', tripsSvc.airportDestination({ title: 'Trip FCO', location: null }), 'Rome');
+check('airport code in location -> city', tripsSvc.airportDestination({ title: 'Offsite', location: 'Nice NCE' }), 'Nice');
+check('place name from a location', tripsSvc.placeName('Soho Farmhouse, Chipping Norton OX7'), 'Soho Farmhouse');
+check('home city from the profile', [
+  promptContext.homeCity({ preferences: { lifestyle_preferences: { home_city: 'London' } } }),
+  promptContext.homeCity({ preferences: '{"work_city":"Paris"}' }),
+  promptContext.homeCity({}),
+], ['London', 'Paris', null]);
+check('trip dates in the client timezone', flows.localDate('2026-11-06T22:30:00Z', 'Asia/Dubai'), '2026-11-07');
+const tripMeta = { destination: 'Rome', start_date: '2026-11-10', end_date: '2026-11-12' };
+check('[Ready] ack (brief wording)', replies.travelAck('Rome'), 'Wonderful. Give me just a moment to cross-reference top-tier local availability for Rome...');
+check('[Ready] note: both tools, dates, short links', [/search_curated_experiences/, /check_dining_availability/, /2026-11-10 to 2026-11-12/, /short link/].every((re) => re.test(replies.travelNote(tripMeta))), true);
+check('travel template numbers as approved {{1}} {{18}}', templates.TEMPLATES.travel_ping.variables(u, { destination: 'Rome' }), { 1: 'Tim', 18: 'Rome' });
+check('travel SID default (approved one)', config.templates.travel_ping, 'HX002ae25165dcb9984ee5c148f5d356a4');
+(async () => {
+  const romeTrip = allDay('Rome weekend FCO', '2026-11-10', '2026-11-13');
+  check('trip by airport code', await tripsSvc.detectTrip(romeTrip, 'London'), { destination: 'Rome', rule: 'airport' });
+  check('no trip: airport is the home city', await tripsSvc.detectTrip(allDay('Back home LHR', '2026-11-10', '2026-11-13'), 'London'), null);
+  check('no trip: one day only', await tripsSvc.detectTrip(allDay('FCO day', '2026-11-10', '2026-11-11'), 'London'), null);
+  check('no trip: no home city and no airport code', await tripsSvc.detectTrip(allDay('Offsite', '2026-11-10', '2026-11-13', 'Soho Farmhouse'), null), null);
+  // Distance rule with the map stubbed (no network in unit tests).
+  const realFind = geocodeMod.findPlace;
+  const places = { London: { lat: 51.5074, lon: -0.1278 }, 'Soho Farmhouse, Chipping Norton': { lat: 51.95, lon: -1.54 }, 'Richmond, London': { lat: 51.461, lon: -0.303 } };
+  geocodeMod.findPlace = async (q) => places[q] || null;
+  try {
+    check('trip by distance (> 50 miles)', await tripsSvc.detectTrip(allDay('Weekend away', '2026-11-10', '2026-11-13', 'Soho Farmhouse, Chipping Norton'), 'London'),
+      { destination: 'Soho Farmhouse', rule: 'distance', miles: 68 });
+    check('no trip: under 50 miles', await tripsSvc.detectTrip(allDay('Staycation', '2026-11-10', '2026-11-13', 'Richmond, London'), 'London'), null);
+    check('no trip: place not on the map', await tripsSvc.detectTrip(allDay('Somewhere', '2026-11-10', '2026-11-13', 'Nowhere Lane'), 'London'), null);
+  } finally {
+    geocodeMod.findPlace = realFind;
+  }
+})();
 check('pickup: 2 h for a UK domestic flight', flightsSvc.suggestedPickup('2026-11-06T08:40:00Z', { from: 'LHR', destination: 'Edinburgh' }).hoursBefore, 2);
 check('pickup: unknown when the event is all-day', flightsSvc.suggestedPickup('2026-11-06', { from: 'LHR' }), null);
 check('airport name: LHR / unknown code', [flightsSvc.airportName('LHR'), flightsSvc.airportName('XYZ'), flightsSvc.airportName(null)], ['London Heathrow Airport', 'XYZ airport', null]);

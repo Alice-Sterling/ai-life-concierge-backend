@@ -138,5 +138,5 @@ function ordinalDate(date, tz = 'Europe/London') {
 }
 
 module.exports = {
-  AIRLINES, AIRPORT_CITY, detectFlight, flightNumber, ordinalDate, airportName, airportTimezone, suggestedPickup,
+  AIRLINES, AIRPORT_CITY, detectFlight, flightNumber, airportIn, ordinalDate, airportName, airportTimezone, suggestedPickup,
 };

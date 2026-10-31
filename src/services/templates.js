@@ -155,6 +155,16 @@ const TEMPLATES = {
       `Hello ${firstName(u)}. I see you are traveling to ${d.destination || 'your destination'} on ${d.date || 'soon'}. `
       + 'Would you like me to arrange an uber, or secure rail tickets?',
   },
+  travel_ping: {
+    name: 'ailc_travel_ping_v1',
+    // Approved with {{1}} name, {{18}} destination. Its text starts with a stray quote mark and its
+    // one button reads "Ready' to review" (Twilio, 31 Oct): the client should make a v2 before go-live.
+    variables: (u, d = {}) => ({ 1: firstName(u), 18: d.destination || 'your destination' }),
+    text: (u, d = {}) =>
+      `Hello ${firstName(u)}. I see you are heading to ${d.destination || 'your destination'} soon. `
+      + "I've prepared a shortlist of hard-to-get dining reservations and private experiences for your dates. "
+      + "Reply 'Ready' to review.",
+  },
   // Plain text only: it goes out 4 hours after Alice's options, inside the window.
   proposal_nudge: {
     name: null,

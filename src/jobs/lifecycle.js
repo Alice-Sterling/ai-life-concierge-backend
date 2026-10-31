@@ -22,6 +22,7 @@ async function runOnce(log = logger) {
     ['weekly_briefings', config.lifecycle.weeklyBriefing, proactiveFlows.runWeeklyBriefings],
     ['milestone_pings', config.lifecycle.milestonePing, proactiveFlows.runMilestonePings],
     ['transit_pings', config.lifecycle.transitPing, proactiveFlows.runTransitPings],
+    ['travel_pings', config.lifecycle.travelPing, proactiveFlows.runTravelPings],
   ];
   const results = {};
   for (const [name, enabled, run] of parts) {
@@ -47,6 +48,7 @@ function start() {
     weekly_briefing: config.lifecycle.weeklyBriefing,
     milestone_ping: config.lifecycle.milestonePing,
     transit_ping: config.lifecycle.transitPing,
+    travel_ping: config.lifecycle.travelPing,
   });
 
   let running = false;

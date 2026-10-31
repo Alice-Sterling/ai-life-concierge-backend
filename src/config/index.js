@@ -173,6 +173,8 @@ const config = {
     milestone_ping: str('TWILIO_TPL_MILESTONE_PING', 'HXd081fba8e431f93bf9229b86919cf32d'),
     // Flow 4: ailc_transit_ping_v2, approved (Twilio Content API, 31 Oct).
     transit_ping: str('TWILIO_TPL_TRANSIT_PING', 'HX4585f83226549166e9c89c4e73a9630d'),
+    // Flow 6: ailc_travel_ping_v1, approved but with a stray quote and a "Ready' to review" button.
+    travel_ping: str('TWILIO_TPL_TRAVEL_PING', 'HX002ae25165dcb9984ee5c148f5d356a4'),
   },
 
   // Proactive messages. Each one is off until its template is approved and
@@ -202,6 +204,10 @@ const config = {
     transitPing: bool('TRANSIT_PING_ENABLED', false),
     transitPingHour: int('TRANSIT_PING_HOUR', 10),
     transitDaysAhead: int('TRANSIT_DAYS_AHEAD', 14),
+    // Flow 6: a multi-day trip (airport code, or > 50 miles from home) up to 14 days ahead -> travel ping.
+    travelPing: bool('TRAVEL_PING_ENABLED', false),
+    travelPingHour: int('TRAVEL_PING_HOUR', 11),
+    travelDaysAhead: int('TRAVEL_DAYS_AHEAD', 14),
     schedule: str('LIFECYCLE_CRON_SCHEDULE', '*/15 * * * *'),
   },
 

@@ -4,6 +4,7 @@
  *   Flow 2 runWeeklyBriefings()  Sunday 18:00 (client's time): "any client dinners or events this week?"
  *   Flow 3 runMilestonePings()   a birthday / anniversary in the calendar about three weeks ahead
  *   Flow 4 runTransitPings()     a flight in the calendar up to 14 days ahead: "uber, or rail?"
+ *   Flow 6 runTravelPings()      a multi-day trip up to 14 days ahead: dining + experiences there
  *
  * Both run inside the 15-minute lifecycle job, each behind its own switch,
  * and send through templates.send() so outbound_messages is the record of
@@ -21,6 +22,8 @@ const templates = require('./templates');
 const events = require('./events');
 const calendar = require('./calendar');
 const flights = require('./flights');
+const trips = require('./trips');
+const promptContext = require('./promptContext');
 const { logger } = require('../lib/logger');
 
 const DAY_MS = 86400e3;
@@ -268,6 +271,104 @@ async function runTransitPings(log = logger, {
   return result;
 }
 
+/** YYYY-MM-DD of an event boundary in the client's timezone (all-day dates are already local). */
+function localDate(value, tz, allDay = false) {
+  if (allDay || /^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value).slice(0, 10);
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'Europe/London' }).format(new Date(value));
+  } catch {
+    return String(value).slice(0, 10);
+  }
+}
+
+/**
+ * Flow 6. Active clients with a connected calendar: a multi-day event up to
+ * TRAVEL_DAYS_AHEAD days out with an airport code, or more than 50 miles from
+ * their home city -> ailc_travel_ping_v1 ("heading to {{18}} soon"). One ping
+ * per trip, at most one travel ping per client per day. The destination and
+ * trip dates are stored with the ping for the [Ready] answer.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.userId]     only this client (admin test tool)
+ * @param {boolean} [opts.ignoreHour] run now, not at the configured local hour (test tool only)
+ * @param {boolean} [opts.ignoreWait] skip the one-ping-a-day rule (test tool only; one ping per trip still holds)
+ */
+async function runTravelPings(log = logger, {
+  userId = null, ignoreHour = false, ignoreWait = false, now = new Date(),
+} = {}) {
+  const { rows } = await db.query(
+    `SELECT u.*
+       FROM users u
+      WHERE u.onboarding_phase = 'Active'
+        AND COALESCE(u.conversation_mode, 'ai') = 'ai'
+        AND u.calendar_connected = true
+        AND ($1::uuid IS NULL OR u.id = $1::uuid)
+        AND ($2::boolean OR NOT EXISTS (SELECT 1 FROM outbound_messages o
+                         WHERE o.user_id = u.id AND o.template_key = 'travel_ping'
+                           AND o.created_at > NOW() - INTERVAL '20 hours'))
+      LIMIT 200`,
+    [userId, Boolean(ignoreWait)], log);
+
+  const from = now;
+  const to = new Date(now.getTime() + config.lifecycle.travelDaysAhead * DAY_MS);
+
+  const result = { candidates: rows.length, scanned: 0, found: 0, sent: 0, skipped: 0, failed: 0 };
+  for (const u of rows) {
+    if (!ignoreHour && localDayHour(u.active_timezone, now).hour !== config.lifecycle.travelPingHour) continue;
+    const userLog = log.child({ user_id: u.id });
+
+    const cal = await calendar.readEvents(u.id, from, to, userLog, { includeFree: true, withLocation: true });
+    if (!cal.ok) { result.failed += 1; userLog.warn('flows.travel_scan_failed', { reason: cal.reason }); continue; }
+    result.scanned += 1;
+
+    // Only events that start inside the window: a trip already under way is not "heading to".
+    const home = promptContext.homeCity(u);
+    let pick = null;
+    for (const ev of cal.events) {
+      if (new Date(ev.start).getTime() < from.getTime() - DAY_MS) continue;
+      if (!trips.isMultiDay(ev)) continue;
+      const key = eventKey(ev);
+      const { rows: seen } = await db.query(
+        `SELECT 1 FROM events
+          WHERE user_id = $1 AND event_name = 'travel_pinged' AND metadata->>'event_key' = $2::text
+          LIMIT 1`,
+        [u.id, key], userLog);
+      if (seen.length) continue;
+      const trip = await trips.detectTrip(ev, home, userLog);
+      if (trip) { pick = { ...trip, key, ev }; break; }
+    }
+    if (!pick) continue;
+    result.found += 1;
+
+    const inWindow = await templates.inWindow(u.id, userLog);
+    if (!config.templates.travel_ping && !inWindow) { result.skipped += 1; continue; }
+    const sent = await templates.send('travel_ping', {
+      to: u.phone_number, user: u, inWindow, data: { destination: pick.destination },
+    }, userLog);
+    if (sent.sent) {
+      result.sent += 1;
+      // All-day "end" is the day after the last day.
+      const endDate = pick.ev.all_day
+        ? new Date(new Date(pick.ev.end).getTime() - DAY_MS).toISOString().slice(0, 10)
+        : localDate(pick.ev.end, u.active_timezone);
+      await events.record('travel_pinged', {
+        userId: u.id,
+        metadata: {
+          event_key: pick.key,
+          destination: pick.destination,
+          rule: pick.rule,
+          start_date: localDate(pick.ev.start, u.active_timezone, pick.ev.all_day),
+          end_date: endDate,
+          via: sent.via,
+        },
+      }, userLog);
+    }
+  }
+  log.info('flows.travel_pings_done', result);
+  return result;
+}
+
 module.exports = {
-  MILESTONES, detectMilestone, localDayHour, eventKey, runWeeklyBriefings, runMilestonePings, runTransitPings,
+  MILESTONES, detectMilestone, localDayHour, eventKey, localDate,
+  runWeeklyBriefings, runMilestonePings, runTransitPings, runTravelPings,
 };

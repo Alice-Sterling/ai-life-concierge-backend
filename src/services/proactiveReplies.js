@@ -11,6 +11,8 @@
  *   transit ping     [ Uber ]           -> Alice proposes a pickup time and sends the Uber link
  *                    [ Rail ]           -> Alice takes the details and hands rail to the desk
  *                    [ All Handled ]    -> canned reply, Alice not called
+ *   travel ping      [ Ready to Review ] -> "one moment", then Alice finds experiences + dining there
+ *                    [ All Handled ]    -> canned reply, Alice not called
  *
  * "Yes" is a common word, so for the two newer pings it only counts as a
  * button answer if nothing else was said since the ping.
@@ -58,6 +60,25 @@ function milestoneNote(type, date) {
 }
 
 const TRANSIT_HANDLED_REPLY = "Understood. Have a wonderful trip, and I'm right here if anything changes.";
+
+// Flow 6, the brief's wording.
+const travelAck = (destination) =>
+  `Wonderful. Give me just a moment to cross-reference top-tier local availability for ${destination || 'your trip'}...`;
+
+function travelNote(meta = {}) {
+  const dates = meta.start_date
+    ? `${meta.start_date}${meta.end_date && meta.end_date !== meta.start_date ? ` to ${meta.end_date}` : ''}`
+    : null;
+  return `The client just tapped "Ready" on Alice's ping about their trip to ${meta.destination || 'their destination'}`
+    + `${dates ? ` (${dates}, from their calendar)` : ''}.\n`
+    + `1. Call search_curated_experiences for ${meta.destination || 'the destination'} (pick interests from their profile; `
+    + 'private and hard-to-get over mass tours).\n'
+    + `2. Call check_dining_availability with area "${meta.destination || 'the destination'}"`
+    + `${meta.start_date ? `, a date in the trip (e.g. ${meta.start_date})` : ''}, 19:30 unless you know better, `
+    + 'and their usual party size (2 if unknown).\n'
+    + '3. Present 2-3 contrasting, verified options (mix experiences and dining) with exact dates, times, prices and '
+    + 'each one\'s short link. When they choose, follow the execution and hand-off protocol.';
+}
 
 /** One line about the flight from the stored ping, in the client's timezone. */
 function flightLine(meta = {}, tz) {
@@ -203,8 +224,26 @@ async function handle(user, incomingText, { requestId = null } = {}, log = logge
     return { contextNote: HANDSHAKE_NOTE };
   }
 
-  if (YES.test(text) || ALL_HANDLED.test(text) || PASS.test(text) || UBER.test(text) || RAIL.test(text)) {
-    const ping = await openPing(user.id, ['weekly_briefing', 'milestone_ping', 'transit_ping'], PING_ANSWER_HOURS, log);
+  if (YES.test(text) || ALL_HANDLED.test(text) || PASS.test(text) || UBER.test(text) || RAIL.test(text)
+      || READY.test(text)) {
+    const ping = await openPing(user.id, ['weekly_briefing', 'milestone_ping', 'transit_ping', 'travel_ping'], PING_ANSWER_HOURS, log);
+
+    // The approved button sends "Ready' to review"; a typed "Ready" works too.
+    if (ping === 'travel_ping' && (READY.test(text) || ALL_HANDLED.test(text))) {
+      if (ALL_HANDLED.test(text)) {
+        await events.record('travel_all_handled', { userId: user.id, requestId }, log);
+        return { reply: TRANSIT_HANDLED_REPLY };
+      }
+      const { rows } = await db.query(
+        `SELECT metadata FROM events
+          WHERE user_id = $1 AND event_name = 'travel_pinged'
+          ORDER BY timestamp DESC LIMIT 1`,
+        [user.id], log);
+      const meta = rows[0]?.metadata || {};
+      if (twilio.isConfigured()) await twilio.sendWhatsApp(user.phone_number, travelAck(meta.destination), log);
+      await events.record('travel_review_requested', { userId: user.id, requestId, metadata: { destination: meta.destination || null } }, log);
+      return { contextNote: travelNote(meta) };
+    }
 
     if (ping === 'transit_ping' && (UBER.test(text) || RAIL.test(text) || ALL_HANDLED.test(text))) {
       if (ALL_HANDLED.test(text)) {
@@ -255,5 +294,5 @@ async function handle(user, incomingText, { requestId = null } = {}, log = logge
 
 module.exports = {
   REVIEW_ACK, HANDSHAKE_NOTE, WEEKLY_YES_REPLY, WEEKLY_HANDLED_REPLY, MILESTONE_PASS_REPLY, TRANSIT_HANDLED_REPLY,
-  dateNightNote, milestoneNote, flightLine, transitUberNote, transitRailNote, handle,
+  dateNightNote, milestoneNote, flightLine, transitUberNote, transitRailNote, travelAck, travelNote, handle,
 };

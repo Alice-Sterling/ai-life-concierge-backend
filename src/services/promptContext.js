@@ -108,4 +108,11 @@ function calendarBlock(user, providerLabel) {
     + 'Never ask them to reconnect their calendar.\n';
 }
 
-module.exports = { profileBlock, tasksBlock, calendarBlock, OPEN_STATUSES };
+/** The client's home city from their profile (else work city), or null. Flow 6's 50-mile rule. */
+function homeCity(user) {
+  const prefs = parseMaybeJson(user?.preferences) || {};
+  const v = pick(prefs, ['home_city', 'homeCity', 'city']) || pick(prefs, ['work_city', 'workCity']);
+  return isEmpty(v) ? null : asText(v);
+}
+
+module.exports = { profileBlock, tasksBlock, calendarBlock, homeCity, OPEN_STATUSES };

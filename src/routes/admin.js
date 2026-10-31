@@ -241,6 +241,8 @@ const TEST_JOBS = {
   // Flow 4: a flight in the next TRANSIT_DAYS_AHEAD days -> the transit ping.
   // ignore_wait skips the one-a-day rule; a flight already pinged is never pinged again.
   transit: (log, opts) => proactiveFlows.runTransitPings(log, { userId: opts.userId, ignoreHour: true, ignoreWait: opts.ignoreWait }),
+  // Flow 6: a multi-day trip in the next TRAVEL_DAYS_AHEAD days -> the travel ping.
+  travel: (log, opts) => proactiveFlows.runTravelPings(log, { userId: opts.userId, ignoreHour: true, ignoreWait: opts.ignoreWait }),
 };
 
 function testUser(req, res) {
@@ -310,6 +312,7 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
       weekly_briefing: config.lifecycle.weeklyBriefing,
       milestone_ping: config.lifecycle.milestonePing,
       transit_ping: config.lifecycle.transitPing,
+      travel_ping: config.lifecycle.travelPing,
       agent_tools: config.agentTools.enabled,
     },
     results,
