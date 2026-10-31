@@ -239,7 +239,8 @@ const TEST_JOBS = {
   // Scans the next 30 days, so a test event can sit on any date.
   milestones: (log, opts) => proactiveFlows.runMilestonePings(log, { userId: opts.userId, ignoreHour: true, windowDays: 30 }),
   // Flow 4: a flight in the next TRANSIT_DAYS_AHEAD days -> the transit ping.
-  transit: (log, opts) => proactiveFlows.runTransitPings(log, { userId: opts.userId, ignoreHour: true }),
+  // ignore_wait skips the one-a-day rule; a flight already pinged is never pinged again.
+  transit: (log, opts) => proactiveFlows.runTransitPings(log, { userId: opts.userId, ignoreHour: true, ignoreWait: opts.ignoreWait }),
 };
 
 function testUser(req, res) {

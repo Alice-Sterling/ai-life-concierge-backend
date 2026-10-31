@@ -104,6 +104,16 @@ const meta = { flight: 'EK2', destination: 'Dubai', from_airport: 'LHR', departs
 check('flight line for Alice', replies.flightLine(meta, 'Europe/London'), 'flight EK2 to Dubai from LHR departing Friday 6 November at 08:40');
 check('flight line, all-day event', replies.flightLine({ ...meta, departs: '2026-11-06' }), 'flight EK2 to Dubai from LHR departing Friday 6 November');
 check('[Uber] note: pickup time + request_transit + Schedule', [/request_transit/, /Schedule/, /3 hours before/].every((re) => re.test(replies.transitUberNote(meta, 'Europe/London'))), true);
+const uberNote = replies.transitUberNote(meta, 'Europe/London');
+check('[Uber] note: pickup time worked out (08:40 - 3 h)', /Friday 6 November at 05:40/.test(uberNote), true);
+check('[Uber] note: drop-off is the departure airport, no guessed terminal', [/"London Heathrow Airport"/.test(uberNote), /terminal only if the client gave one/.test(uberNote)], [true, true]);
+check('[Uber] note: new trip, nothing reused', /do not reuse any address/.test(uberNote), true);
+check('[Uber] note: London airport -> London time even for a Dubai-based client', /05:40/.test(replies.transitUberNote(meta, 'Asia/Dubai')), true);
+check('[Uber] note: unknown airport -> client timezone', /09:40/.test(replies.transitUberNote({ ...meta, from_airport: 'XYZ' }, 'Asia/Dubai')), true);
+check('airport timezone', [flightsSvc.airportTimezone('LHR'), flightsSvc.airportTimezone('DXB'), flightsSvc.airportTimezone('XYZ')], ['Europe/London', 'Asia/Dubai', null]);
+check('pickup: 2 h for a UK domestic flight', flightsSvc.suggestedPickup('2026-11-06T08:40:00Z', { from: 'LHR', destination: 'Edinburgh' }).hoursBefore, 2);
+check('pickup: unknown when the event is all-day', flightsSvc.suggestedPickup('2026-11-06', { from: 'LHR' }), null);
+check('airport name: LHR / unknown code', [flightsSvc.airportName('LHR'), flightsSvc.airportName('XYZ'), flightsSvc.airportName(null)], ['London Heathrow Airport', 'XYZ airport', null]);
 check('[Rail] note: hand to the desk', /handoff_to_concierge/.test(replies.transitRailNote(meta, 'Europe/London')), true);
 
 console.log('\nAGENT TOOLS');

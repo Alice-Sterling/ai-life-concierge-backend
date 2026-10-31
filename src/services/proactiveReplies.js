@@ -26,6 +26,7 @@ const db = require('../db/pool');
 const twilio = require('../integrations/twilio');
 const events = require('./events');
 const templates = require('./templates');
+const flights = require('./flights');
 const { logger } = require('../lib/logger');
 
 const PING_ANSWER_HOURS = 48;
@@ -81,16 +82,42 @@ function flightLine(meta = {}, tz) {
   ].filter(Boolean).join(' ');
 }
 
-function transitUberNote(meta, tz) {
-  return `The client just tapped "Uber" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar). `
-    + 'Arrange the ride to the departure airport: propose a pickup time (about 3 hours before an international '
-    + 'departure, 2 hours before a domestic one) and ask only for what you do not know yet (normally the pickup '
-    + 'address). Then call request_transit with the pickup address and the departure airport and terminal as '
-    + 'the drop-off, send the link, remind them to tap "Schedule" in Uber for that time, and offer that the '
-    + 'team can book it for them instead.';
+const localWhen = (date, tz) => {
+  try {
+    return new Date(date).toLocaleString('en-GB', {
+      weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: tz || 'Europe/London',
+    });
+  } catch {
+    return new Date(date).toISOString();
+  }
+};
+
+/**
+ * [Uber] on the transit ping. The first live test (31 Oct) showed Alice reusing
+ * an earlier trip's addresses and skipping the time, so the pickup time and the
+ * airport are worked out here and the steps are spelled out.
+ */
+function transitUberNote(meta, clientTz) {
+  // Times on the departure airport's clock (where the car runs), else the client's.
+  const tz = flights.airportTimezone(meta.from_airport) || clientTz;
+  const pickup = flights.suggestedPickup(meta.departs, { from: meta.from_airport, destination: meta.destination });
+  const airport = flights.airportName(meta.from_airport);
+  return `The client just tapped "Uber" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar; `
+    + `times are ${tz} time). `
+    + 'This is a NEW trip: do not reuse any address, terminal or time from earlier in the chat.\n'
+    + '1. In this reply, propose the pickup time: '
+    + (pickup
+      ? `${localWhen(pickup.at, tz)} (${pickup.hoursBefore} hours before departure). `
+      : 'about 3 hours before an international departure, 2 hours before a domestic one (ask the departure time if unknown). ')
+    + 'Ask where to pick them up, unless they already said so in this message. Do not call request_transit before you have the pickup address.\n'
+    + `2. Then call request_transit with that pickup, dropoff "${airport || 'the departure airport'}"`
+    + ' (add a terminal only if the client gave one), and pickup_time.\n'
+    + '3. Send the link and say clearly: "tap Schedule in Uber and set <the pickup time>, otherwise it books a car now".\n'
+    + '4. Offer that the team can book it for them instead.';
 }
 
-function transitRailNote(meta, tz) {
+function transitRailNote(meta, clientTz) {
+  const tz = flights.airportTimezone(meta.from_airport) || clientTz;
   return `The client just tapped "Rail" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar). `
     + 'Rail tickets are booked by the concierge team. Confirm in one short message the station or address they '
     + 'travel from and when they want to arrive at the airport (suggest a time), then call handoff_to_concierge '

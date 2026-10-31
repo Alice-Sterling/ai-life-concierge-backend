@@ -480,13 +480,13 @@ const HANDLERS = {
       booking_link: link,
       pickup: pick ? pick.address : "the client's current location",
       dropoff: drop.address,
+      books: 'NOW, unless the client taps "Schedule" in Uber and sets the time',
       note: 'Send the short "link" on its own line: one tap opens Uber with the trip filled in, and they book it. '
         + (rough.length
           ? 'The map found the postcode or street, not the exact venue: ask them to check the pin in Uber before booking. '
           : '')
-        + (input.pickup_time
-          ? 'Uber links cannot set a time: for a later pickup, tell them to tap "Schedule" in Uber. '
-          : '')
+        + 'The link books a car for right now. Unless the trip is right now, say the pickup time'
+        + `${input.pickup_time ? ` (${input.pickup_time})` : ''} and tell them to tap "Schedule" in Uber and set it. `
         + 'Then offer that the team can book it for them instead (queue_local_dispatch). '
         + 'Do not quote a price or arrival time: the link does not give one.',
     };

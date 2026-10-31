@@ -197,8 +197,11 @@ async function runMilestonePings(log = logger, {
  * @param {object} [opts]
  * @param {string} [opts.userId]     only this client (admin test tool)
  * @param {boolean} [opts.ignoreHour] run now, not at the configured local hour (test tool only)
+ * @param {boolean} [opts.ignoreWait] skip the one-ping-a-day rule (test tool only; one ping per flight still holds)
  */
-async function runTransitPings(log = logger, { userId = null, ignoreHour = false, now = new Date() } = {}) {
+async function runTransitPings(log = logger, {
+  userId = null, ignoreHour = false, ignoreWait = false, now = new Date(),
+} = {}) {
   const { rows } = await db.query(
     `SELECT u.*
        FROM users u
@@ -206,11 +209,11 @@ async function runTransitPings(log = logger, { userId = null, ignoreHour = false
         AND COALESCE(u.conversation_mode, 'ai') = 'ai'
         AND u.calendar_connected = true
         AND ($1::uuid IS NULL OR u.id = $1::uuid)
-        AND NOT EXISTS (SELECT 1 FROM outbound_messages o
+        AND ($2::boolean OR NOT EXISTS (SELECT 1 FROM outbound_messages o
                          WHERE o.user_id = u.id AND o.template_key = 'transit_ping'
-                           AND o.created_at > NOW() - INTERVAL '20 hours')
+                           AND o.created_at > NOW() - INTERVAL '20 hours'))
       LIMIT 200`,
-    [userId], log);
+    [userId, Boolean(ignoreWait)], log);
 
   // From "now" so a flight later today is still offered a car; up to N days out.
   const from = now;

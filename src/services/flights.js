@@ -80,6 +80,47 @@ function detectFlight(event) {
   return { flight: number, destination, from };
 }
 
+/** Names that find the right place on the map for the drop-off. Others: "<code> airport". */
+const AIRPORT_NAME = {
+  LHR: 'London Heathrow Airport', LGW: 'London Gatwick Airport', LCY: 'London City Airport',
+  STN: 'London Stansted Airport', LTN: 'London Luton Airport', SEN: 'London Southend Airport',
+  MAN: 'Manchester Airport', EDI: 'Edinburgh Airport', GLA: 'Glasgow Airport', BHX: 'Birmingham Airport',
+  BRS: 'Bristol Airport', NCL: 'Newcastle Airport', DXB: 'Dubai International Airport',
+};
+const UK_CITIES = new Set(['London', 'Manchester', 'Edinburgh', 'Glasgow', 'Birmingham', 'Bristol', 'Newcastle', 'Belfast']);
+
+const airportName = (code) => (code ? AIRPORT_NAME[code] || `${code} airport` : null);
+
+/** Departure city -> timezone: the car to the airport runs on the airport's clock, not the client's. */
+const CITY_TZ = {
+  London: 'Europe/London', Manchester: 'Europe/London', Edinburgh: 'Europe/London', Glasgow: 'Europe/London',
+  Birmingham: 'Europe/London', Bristol: 'Europe/London', Newcastle: 'Europe/London', Jersey: 'Europe/Jersey',
+  Guernsey: 'Europe/Guernsey', Dublin: 'Europe/Dublin', Dubai: 'Asia/Dubai', 'Abu Dhabi': 'Asia/Dubai',
+  Doha: 'Asia/Qatar', Paris: 'Europe/Paris', Amsterdam: 'Europe/Amsterdam', Brussels: 'Europe/Brussels',
+  Frankfurt: 'Europe/Berlin', Munich: 'Europe/Berlin', Berlin: 'Europe/Berlin', Zurich: 'Europe/Zurich',
+  Geneva: 'Europe/Zurich', Vienna: 'Europe/Vienna', Madrid: 'Europe/Madrid', Barcelona: 'Europe/Madrid',
+  Lisbon: 'Europe/Lisbon', Rome: 'Europe/Rome', Milan: 'Europe/Rome', Nice: 'Europe/Paris', Athens: 'Europe/Athens',
+  Istanbul: 'Europe/Istanbul', 'New York': 'America/New_York', Miami: 'America/New_York', 'Los Angeles': 'America/Los_Angeles',
+  Singapore: 'Asia/Singapore', 'Hong Kong': 'Asia/Hong_Kong',
+};
+
+/** @returns {string|null} the departure airport's timezone, when known */
+const airportTimezone = (code) => CITY_TZ[AIRPORT_CITY[code]] || null;
+
+/**
+ * When to leave for the airport: 3 hours before an international departure,
+ * 2 hours before a domestic one (both ends in the UK).
+ * @returns {null | { at: Date, hoursBefore: number }} null when the departure time is not known
+ */
+function suggestedPickup(departs, { from = null, destination = null } = {}) {
+  if (!departs || /^\d{4}-\d{2}-\d{2}$/.test(String(departs))) return null;
+  const t = new Date(departs).getTime();
+  if (!Number.isFinite(t)) return null;
+  const domestic = UK_CITIES.has(AIRPORT_CITY[from]) && UK_CITIES.has(destination);
+  const hoursBefore = domestic ? 2 : 3;
+  return { at: new Date(t - hoursBefore * 3600e3), hoursBefore };
+}
+
 /** {{10}} as approved ("5th of April"), in the client's timezone. */
 function ordinalDate(date, tz = 'Europe/London') {
   const d = new Date(date);
@@ -96,4 +137,6 @@ function ordinalDate(date, tz = 'Europe/London') {
   return `${day}${suffix} of ${month}`;
 }
 
-module.exports = { AIRLINES, AIRPORT_CITY, detectFlight, flightNumber, ordinalDate };
+module.exports = {
+  AIRLINES, AIRPORT_CITY, detectFlight, flightNumber, ordinalDate, airportName, airportTimezone, suggestedPickup,
+};
