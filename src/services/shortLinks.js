@@ -1,5 +1,7 @@
 /**
- * Short links for WhatsApp: <PUBLIC_BASE_URL>/go/<code> -> the real booking page.
+ * Short links for WhatsApp: <PUBLIC_BASE_URL>/go/<site>/<code> -> the real booking
+ * page, e.g. /go/uber/Xk3p9Q2a (Tim, 31 Oct: the client should see it is an Uber
+ * booking). Only the code is looked up; the site name is for the reader.
  *
  * Uber and shop links run to hundreds of characters; in a chat they look like
  * noise. Alice sends the short one, the client taps it, GET /go/:code answers
@@ -25,6 +27,26 @@ const newCode = () => crypto.randomBytes(6).toString('base64url');
 
 const isWebUrl = (url) => /^https?:\/\/\S+$/i.test(String(url || ''));
 
+const HOST_PREFIXES = new Set(['www', 'm', 'shop', 'store']);
+const HOST_SUFFIXES = new Set(['com', 'co', 'uk', 'org', 'net', 'io', 'de', 'fr', 'it', 'es', 'ae', 'us', 'eu']);
+
+/**
+ * The site's name for the link, so the client sees where it goes:
+ * m.uber.com -> 'uber', www.moysesflowers.co.uk -> 'moysesflowers'.
+ * @returns {string|null} null when there is no sensible name
+ */
+function siteLabel(url) {
+  try {
+    const parts = new URL(url).hostname.toLowerCase().split('.')
+      .filter((p) => !HOST_PREFIXES.has(p));
+    while (parts.length > 1 && HOST_SUFFIXES.has(parts[parts.length - 1])) parts.pop();
+    const name = (parts.pop() || '').replace(/[^a-z0-9-]/g, '').slice(0, 24);
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * @returns {Promise<string>} the short link, or the original url if one cannot be made
  */
@@ -37,7 +59,8 @@ async function shorten(url, { userId = null } = {}, log = logger) {
       [userId, CREATED, JSON.stringify({ code, url })],
       log
     );
-    return `${config.publicBaseUrl.replace(/\/$/, '')}/go/${code}`;
+    const label = siteLabel(url);
+    return `${config.publicBaseUrl.replace(/\/$/, '')}/go/${label ? `${label}/` : ''}${code}`;
   } catch (err) {
     log.warn('short_link.create_failed', { message: err.message });
     return url;
@@ -68,4 +91,4 @@ async function resolve(code, log = logger) {
   return row.url;
 }
 
-module.exports = { shorten, resolve, newCode, isWebUrl, CODE };
+module.exports = { shorten, resolve, newCode, isWebUrl, siteLabel, CODE };

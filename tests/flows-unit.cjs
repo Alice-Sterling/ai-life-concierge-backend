@@ -162,6 +162,10 @@ const shortLinks = require('../src/services/shortLinks');
 const codes = new Set(Array.from({ length: 200 }, () => shortLinks.newCode()));
 check('codes: 8 URL-safe characters', [...codes].every((c) => shortLinks.CODE.test(c)), true);
 check('codes: no repeats in 200', codes.size, 200);
+check('site names for the link', [
+  'https://m.uber.com/looking?pickup=x', 'https://www.opentable.com/restaurant/profile/1', 'https://www.moysesflowers.co.uk/peony-delight',
+  'https://www.getyourguide.com/edinburgh-l44/x', 'https://www.eventbrite.co.uk/e/1', 'https://www.bloomandwild.com/send-flowers/x', 'not a url',
+].map(shortLinks.siteLabel), ['uber', 'opentable', 'moysesflowers', 'getyourguide', 'eventbrite', 'bloomandwild', null]);
 check('only web links are shortened', [shortLinks.isWebUrl('https://a.co/x'), shortLinks.isWebUrl('javascript:alert(1)'), shortLinks.isWebUrl('')], [true, false, false]);
 (async () => {
   const fake = async (url) => `https://x.app/go/${url.length}`;
