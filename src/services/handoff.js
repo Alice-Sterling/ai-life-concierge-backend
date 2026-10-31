@@ -47,6 +47,9 @@ const HANDOFF_TOOL = {
           + 'person can act on it without reading the chat.',
       },
       priority: { type: 'string', enum: ['normal', 'high', 'vip'] },
+      booking_link: { type: 'string', description: "The chosen option's booking_link from a search tool result, if any." },
+      vendor_phone: { type: 'string', description: "The chosen option's vendor_phone from a search tool result, if any." },
+      price: { type: 'string', description: "The chosen option's price as the tool showed it, if any." },
     },
     required: ['category', 'summary'],
   },
@@ -71,8 +74,22 @@ function extractTags(reply) {
  * Hand a client to the desk.
  * @returns {Promise<object>} the task
  */
-async function toHuman(user, { summary, category = 'general', priority = 'high', sourceMessage = null, requestId = null, via = 'tool' }, log = logger) {
+async function toHuman(user, {
+  summary, category = 'general', priority = 'high', sourceMessage = null, requestId = null, via = 'tool',
+  bookingLink = null, vendorPhone = null, price = null,
+}, log = logger) {
   await users.setConversationMode(user.id, 'human', { requestId, source: `alice_handoff_${via}` }, log);
+
+  // The chosen option's link, phone and price (from the Apify search tools) go
+  // to their own Airtable columns for the desk, and into the summary so
+  // Postgres and the desk email keep them too.
+  const desk = { bookingLink, vendorPhone, price };
+  const deskLines = [
+    bookingLink && `Booking link: ${bookingLink}`,
+    vendorPhone && `Vendor phone: ${vendorPhone}`,
+    price && `Price: ${price}`,
+  ].filter(Boolean);
+  if (deskLines.length) summary = `${summary || ''}\n\n${deskLines.join('\n')}`.trim();
 
   const task = await tasks.create({
     userId: user.id,
@@ -83,6 +100,7 @@ async function toHuman(user, { summary, category = 'general', priority = 'high',
     requiresHuman: true,
     assignedTo: DESK_EMAIL,
     requestId,
+    desk,
   }, log);
 
   const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || 'Unknown';

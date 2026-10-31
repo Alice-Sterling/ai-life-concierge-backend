@@ -224,9 +224,15 @@ async function syncUser(user, log = logger) {
  *
  * @returns {Promise<string|null>} the Airtable record id, or null if not synced
  */
-async function syncTask(task, userRecordId, log = logger) {
+async function syncTask(task, userRecordId, log = logger, desk = null) {
   const tableRef = config.airtable.tasksTableRef;
   if (!isConfigured() || !tableRef) return null;
+
+  // Booking Link (url), Vendor Phone (phone), Price (text): added 31 Oct for
+  // the desk. Only sent when known; empty values are dropped below.
+  const deskFields = desk
+    ? { 'Booking Link': desk.bookingLink, 'Vendor Phone': desk.vendorPhone, Price: desk.price }
+    : {};
 
   // Field names are the client's Tasks table exactly. "Assigned To" there is a
   // link to Team Members, so the desk email is not sent: an email string in a
@@ -239,6 +245,7 @@ async function syncTask(task, userRecordId, log = logger) {
     Priority: task.priority,
     Category: task.category,
     'Requires Human': Boolean(task.requires_human),
+    ...deskFields,
     ...(userRecordId ? { [config.airtable.tasksUserLinkField]: [userRecordId] } : {}),
   });
 

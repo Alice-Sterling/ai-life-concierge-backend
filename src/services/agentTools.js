@@ -14,12 +14,17 @@
  *     before any client sees it.
  *
  * Tools so far:
- *   queue_local_dispatch    no car service covers the trip -> the desk arranges a local taxi
- *   submit_private_inquiry  private dining / events -> an inquiry drafted for the desk to send
+ *   queue_local_dispatch        no car service covers the trip -> the desk arranges a local taxi
+ *   submit_private_inquiry      private dining / events -> an inquiry drafted for the desk to send
+ *   check_dining_availability   live OpenTable tables (Apify); Google Maps venues as a fallback
+ *   source_retail_gift          UK gifts and flowers with price and store (Apify, Google Shopping)
+ *   search_curated_experiences  tours and activities (Apify, GetYourGuide search)
+ *   search_local_events         ticketed local events (Apify, Eventbrite)
  */
 
 const users = require('./users');
 const tasks = require('./tasks');
+const apify = require('../integrations/apify');
 const email = require('../integrations/email');
 const { DESK_EMAIL } = require('./handoff');
 const { config } = require('../config');
@@ -63,7 +68,84 @@ const SUBMIT_PRIVATE_INQUIRY_TOOL = {
   },
 };
 
-const TOOLS = [QUEUE_LOCAL_DISPATCH_TOOL, SUBMIT_PRIVATE_INQUIRY_TOOL];
+const CHECK_DINING_TOOL = {
+  name: 'check_dining_availability',
+  description:
+    'Check live table availability for a standard restaurant booking (1 to 6 guests) in an area, for a date, '
+    + 'time and party size. Returns real restaurants with bookable times, price band, rating, address and the '
+    + 'booking link. Use it BEFORE you suggest any restaurant. Not for more than 6 guests or members\' clubs '
+    + '(use submit_private_inquiry).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      area: { type: 'string', description: "Neighbourhood and city, e.g. 'Mayfair, London'." },
+      date: { type: 'string', description: 'YYYY-MM-DD, in the client\'s local time.' },
+      time: { type: 'string', description: 'Preferred time, HH:MM 24-hour, e.g. 19:30.' },
+      party_size: { type: 'integer', description: 'Number of guests, 1 to 6.' },
+      cuisine: { type: 'string', description: "Optional cuisine or keyword, e.g. 'Italian', 'sushi'." },
+    },
+    required: ['area', 'date', 'time', 'party_size'],
+  },
+};
+
+const SOURCE_GIFT_TOOL = {
+  name: 'source_retail_gift',
+  description:
+    'Find real, currently listed gifts or flowers from UK shops, with price and store. Use it before you '
+    + 'suggest any gift or bouquet. Build the search from what you know about the recipient (style, budget, '
+    + 'brands they like). Delivery dates are not checked by this tool: the team confirms delivery at checkout.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      search: { type: 'string', description: "Product search, e.g. 'luxury peony bouquet next day delivery'." },
+      budget_max_gbp: { type: 'number', description: 'Optional top price in GBP.' },
+    },
+    required: ['search'],
+  },
+};
+
+const SEARCH_EXPERIENCES_TOOL = {
+  name: 'search_curated_experiences',
+  description:
+    'Find bookable tours, private experiences and attraction tickets in a destination (GetYourGuide) with '
+    + 'price, rating and booking link. Use it for travel itineraries and activities.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      destination: { type: 'string', description: "City, e.g. 'Rome'." },
+      interests: { type: 'string', description: "Optional, e.g. 'private boat tour', 'art', 'wine tasting'." },
+    },
+    required: ['destination'],
+  },
+};
+
+const EVENT_CATEGORIES = [
+  'arts', 'music', 'food-and-drink', 'business', 'film-and-media', 'sports-and-fitness',
+  'fashion', 'charity-and-causes', 'community', 'health', 'hobbies', 'travel-and-outdoor',
+];
+
+const SEARCH_EVENTS_TOOL = {
+  name: 'search_local_events',
+  description:
+    'Find ticketed local events (Eventbrite) in a city for a date range and category, with date, time, venue '
+    + 'and ticket link. Use it for local cultural events.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      city: { type: 'string', description: "City, e.g. 'London'." },
+      country: { type: 'string', description: "Country, default 'United Kingdom'." },
+      category: { type: 'string', enum: EVENT_CATEGORIES },
+      start_date: { type: 'string', description: 'YYYY-MM-DD' },
+      end_date: { type: 'string', description: 'YYYY-MM-DD' },
+    },
+    required: ['city', 'category', 'start_date', 'end_date'],
+  },
+};
+
+const TOOLS = [
+  QUEUE_LOCAL_DISPATCH_TOOL, SUBMIT_PRIVATE_INQUIRY_TOOL,
+  CHECK_DINING_TOOL, SOURCE_GIFT_TOOL, SEARCH_EXPERIENCES_TOOL, SEARCH_EVENTS_TOOL,
+];
 const NAMES = new Set(TOOLS.map((t) => t.name));
 
 /** Does this user get the agent tools? Everyone once switched on; test accounts always. */
@@ -84,11 +166,125 @@ function promptBlock(userId) {
   if (!enabledFor(userId)) return '';
   return `
 ### AGENT TOOLS (verify before you pitch)
+- Restaurants for 1 to 6 guests: call check_dining_availability first. Present only places it returns with an available time, and name the exact time.
 - Members' clubs, private dining rooms, or more than 6 guests: call submit_private_inquiry. Do NOT check live availability for these.
+- Gifts and flowers: call source_retail_gift first. Give the price and the shop; say the team confirms the delivery date.
+- Tours, activities and travel itineraries: call search_curated_experiences. Local cultural events: call search_local_events.
 - A car the client has confirmed that no car service can quote (no coverage, or they want a local firm): call queue_local_dispatch.
+- Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
+- When the client picks one, call handoff_to_concierge and copy that option's booking_link, vendor_phone and price from the tool result into it.
 - If a tool says it could not verify, do not present options: tell the client the team will check personally and call handoff_to_concierge.
 `;
 }
+
+// ---- Apify results -> short, plain options for Alice -------------------------
+// Alice reads these as tool results, so they stay small: a few options, only
+// the fields she can use, and the link/phone/price the desk needs later.
+
+const hhmmToMinutes = (s) => {
+  const m = /(\d{1,2}):(\d{2})/.exec(String(s || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+/** The 6 bookable slot times (HH:MM) closest to the requested time, within `windowMin`, in time order. */
+function slotsNear(slots, time, windowMin = 90) {
+  const want = hhmmToMinutes(time);
+  const gap = (t) => (want == null ? 0 : Math.abs(hhmmToMinutes(t) - want));
+  return (slots || [])
+    .filter((s) => s && s.available !== false)
+    .map((s) => String(s.dateTime || '').slice(11, 16))
+    .filter((t) => gap(t) <= windowMin)
+    .sort((a, b) => gap(a) - gap(b))
+    .slice(0, 6)
+    .sort();
+}
+
+/** One OpenTable restaurant (rl1987/opentable-api-scraper) -> an option. */
+function mapOpenTable(r, time) {
+  const avail = r.availabilitySlots || {};
+  const slots = avail.slots || [];
+  return {
+    name: r.name,
+    cuisine: (r.cuisines || []).join(', ') || null,
+    price: r.priceBand || null,
+    rating: r.rating ?? null,
+    reviews: r.reviewCount ?? null,
+    address: [r.address, r.postalCode].filter(Boolean).join(', ') || null,
+    vendor_phone: r.phone || r.phoneNumber || r.profile?.phone || null,
+    booking_link: r.url || null,
+    available_times: slotsNear(slots, time),
+    card_required: slots.some((s) => s.requiresCreditCard) || undefined,
+    not_bookable_reason: (avail.noTimesReasons || [])[0] || undefined,
+  };
+}
+
+/** One Google Maps place (compass/crawler-google-places) -> an option. Table not checked. */
+function mapGooglePlace(p) {
+  return {
+    name: p.title,
+    cuisine: p.categoryName || null,
+    price: p.price || null,
+    rating: p.totalScore ?? null,
+    reviews: p.reviewsCount ?? null,
+    address: p.address || null,
+    vendor_phone: p.phone || null,
+    booking_link: p.reserveTableUrl || p.tableReservationLinks?.[0]?.url || p.website || p.url || null,
+  };
+}
+
+const parseGbp = (s) => {
+  const n = Number.parseFloat(String(s ?? '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+};
+
+/** One Google Shopping product (damilo/google-shopping-apify) -> an option. */
+function mapProduct(p) {
+  return {
+    title: p.title,
+    store: p.source || null,
+    price: p.price || null,
+    rating: p.rating ?? undefined,
+    booking_link: p.link || null,
+  };
+}
+
+/** One tour (memo23/tours-activities-scraper) -> an option. */
+function mapTour(t) {
+  return {
+    title: t.title,
+    platform: t.provider || t.platform || null,
+    price: t.price != null ? `${t.currency === 'GBP' ? '£' : `${t.currency || ''} `}${t.price}` : null,
+    rating: t.rating ?? null,
+    reviews: t.reviewCount ?? null,
+    duration: t.durationText || undefined,
+    // GetYourGuide adds search-tracking parameters; the page is the same without them.
+    booking_link: t.url ? String(t.url).split('?')[0] : null,
+  };
+}
+
+/** GetYourGuide's own search page. The actor's free-text "search" input ignored the term (31 Oct test). */
+const gygSearchUrl = (term) => `https://www.getyourguide.com/s/?q=${encodeURIComponent(term)}`;
+
+/** One Eventbrite event (xenondev/xenon-eventbrite-events) -> an option. */
+function mapEvent(e) {
+  const min = e.ticket_availability?.minimum_ticket_price;
+  return {
+    name: e.name,
+    date: e.start_date || null,
+    time: e.start_time || null,
+    venue: [e.primary_venue?.name, e.primary_venue?.address?.city].filter(Boolean).join(', ') || null,
+    price: e.ticket_availability?.is_free ? 'Free' : (min?.display || null),
+    booking_link: e.url || null,
+  };
+}
+
+/** Eventbrite's location slug: 'united-kingdom--london'. */
+const slug = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const eventbriteCity = (city, country = 'United Kingdom') => `${slug(country)}--${slug(city)}`;
+
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+const PICK_NOTE = 'Present 2 to 3 contrasting options. When the client picks one, call handoff_to_concierge '
+  + "with that option's booking_link, vendor_phone and price.";
 
 /** The answer a tool gives when it could not check: Alice must not guess. */
 function cannotVerify(reason) {
@@ -187,6 +383,135 @@ const HANDLERS = {
         + 'Do not claim the venue has confirmed anything.',
     };
   },
+
+  async check_dining_availability(user, input, ctx, log) {
+    const party = Number.parseInt(input.party_size, 10) || 2;
+    if (party > 6) {
+      return { ok: false, use_instead: 'submit_private_inquiry', note: 'More than 6 guests: send a private inquiry instead.' };
+    }
+    if (!isDate(input.date)) return { ok: false, error: 'date must be YYYY-MM-DD.' };
+    if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live availability is not set up yet.'));
+
+    const time = hhmmToMinutes(input.time) != null ? input.time : '19:30';
+    const found = await apify.run('opentable', {
+      mode: 'search',
+      location: input.area,
+      q: input.cuisine || '',
+      includeAvailability: true,
+      includeDetails: true,
+      date: input.date,
+      time,
+      partySize: party,
+      maxItems: 6,
+    }, { userId: user.id, maxItems: 6 }, log);
+
+    const restaurants = found.map((r) => mapOpenTable(r, time));
+    const open = restaurants.filter((r) => r.available_times.length);
+    if (open.length) {
+      return {
+        ok: true,
+        verified: true,
+        source: 'OpenTable, live',
+        request: { area: input.area, date: input.date, time, party_size: party },
+        options: open.slice(0, 4),
+        fully_booked_near_that_time: restaurants.filter((r) => !r.available_times.length).map((r) => r.name),
+        note: `${PICK_NOTE} Quote the exact available times.`,
+      };
+    }
+    if (restaurants.length) {
+      return {
+        ok: true,
+        verified: true,
+        options: [],
+        fully_booked_near_that_time: restaurants.map((r) => r.name),
+        note: 'Nothing bookable within 90 minutes of that time. Offer another time or date, or a different area, '
+          + 'and check again. Do not suggest these restaurants for the requested time.',
+      };
+    }
+
+    // Not on OpenTable here: real venues from Google Maps, table not checked.
+    const places = await apify.run('googleMaps', {
+      searchStringsArray: [`${input.cuisine || ''} restaurant in ${input.area}`.trim()],
+      maxCrawledPlacesPerSearch: 4,
+      language: 'en',
+      scrapeTableReservationProvider: true,
+      skipClosedPlaces: true,
+    }, { userId: user.id, maxItems: 4 }, log);
+    if (!places.length) return JSON.parse(cannotVerify('No restaurants found for that area.'));
+    return {
+      ok: true,
+      verified: false,
+      source: 'Google Maps (table availability NOT checked)',
+      options: places.map(mapGooglePlace),
+      note: 'These are real, open venues, but their tables are not checked. You may suggest them only as '
+        + '"the team will confirm a table". ' + PICK_NOTE,
+    };
+  },
+
+  async source_retail_gift(user, input, ctx, log) {
+    if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live product search is not set up yet.'));
+    const found = await apify.run('googleShopping', {
+      query: input.search, country: 'gb', language: 'en', num: '10', max_pages: 1, date_range: 'anytime',
+    }, { userId: user.id, maxItems: 20 }, log);
+
+    const max = Number(input.budget_max_gbp);
+    const products = found
+      .map(mapProduct)
+      .filter((p) => p.title && p.price)
+      .filter((p) => !(max > 0) || (parseGbp(p.price) ?? Infinity) <= max)
+      .slice(0, 6);
+    if (!products.length) return JSON.parse(cannotVerify('No listed products matched that search and budget.'));
+    return {
+      ok: true,
+      verified: true,
+      source: 'Google Shopping UK, live listings',
+      options: products,
+      delivery: 'not checked: say the team confirms the delivery date at checkout',
+      note: PICK_NOTE,
+    };
+  },
+
+  async search_curated_experiences(user, input, ctx, log) {
+    if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live experience search is not set up yet.'));
+    const term = [input.destination, input.interests].filter(Boolean).join(' ');
+    const found = await apify.run('tours', {
+      startUrls: [{ url: gygSearchUrl(term) }], maxItems: 5, includeReviews: false, country: 'gb',
+    }, { userId: user.id, maxItems: 5 }, log);
+    const tours = found.map(mapTour).filter((t) => t.title && t.booking_link);
+    if (!tours.length) return JSON.parse(cannotVerify(`No bookable experiences found for ${term}.`));
+    return {
+      ok: true,
+      verified: true,
+      source: 'GetYourGuide, live listings',
+      options: tours,
+      note: `${PICK_NOTE} Dates are confirmed by the team when booking.`,
+    };
+  },
+
+  async search_local_events(user, input, ctx, log) {
+    if (!isDate(input.start_date) || !isDate(input.end_date)) return { ok: false, error: 'Dates must be YYYY-MM-DD.' };
+    if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live event search is not set up yet.'));
+    const country = input.country || 'United Kingdom';
+    const found = await apify.run('eventbrite', {
+      city: eventbriteCity(input.city, country),
+      country: slug(country),
+      category: EVENT_CATEGORIES.includes(input.category) ? input.category : 'arts',
+      startDate: input.start_date,
+      endDate: input.end_date,
+      maxPages: 1,
+      maxItems: 6,
+      proxyConfiguration: { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], apifyProxyCountry: 'GB' },
+    }, { userId: user.id, maxItems: 6 }, log);
+    const events = found.map(mapEvent).filter((e) => e.name && e.booking_link);
+    if (!events.length) return JSON.parse(cannotVerify('No events found for that city and dates.'));
+    return {
+      ok: true,
+      verified: true,
+      source: 'Eventbrite, live listings',
+      options: events,
+      note: `${PICK_NOTE} Ticket prices are shown on the event page; the team confirms them.`,
+    };
+  },
 };
 
 /**
@@ -208,4 +533,8 @@ async function run(name, input, { userId, sourceMessage = null, requestId = null
   }
 }
 
-module.exports = { TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run };
+module.exports = {
+  TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run,
+  // result shaping, exported for tests
+  slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
+};

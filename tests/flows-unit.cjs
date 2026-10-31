@@ -9,6 +9,7 @@ process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://unit:unit@127.0.0.1:1/none';
 process.env.ADMIN_API_TOKEN = 'test-admin-token-12345';
 delete process.env.AGENT_TOOLS_ENABLED;
+delete process.env.APIFY_TOKEN;
 
 const { config } = require('../src/config');
 const flows = require('../src/services/proactiveFlows');
@@ -80,10 +81,15 @@ const stranger = '00000000-0000-4000-8000-000000000000';
 const tester = config.testTools.userIds[0];
 check('client: no tools while off', agentTools.definitionsFor(stranger).length, 0);
 check('client: no prompt block while off', agentTools.promptBlock(stranger), '');
-check('test account: both tools', agentTools.definitionsFor(tester).map((t) => t.name), ['queue_local_dispatch', 'submit_private_inquiry']);
+check('test account: all tools', agentTools.definitionsFor(tester).map((t) => t.name), [
+  'queue_local_dispatch', 'submit_private_inquiry', 'check_dining_availability',
+  'source_retail_gift', 'search_curated_experiences', 'search_local_events',
+]);
 check('test account: routing block', /submit_private_inquiry/.test(agentTools.promptBlock(tester)), true);
+check('routing block: dining checked first', /check_dining_availability first/.test(agentTools.promptBlock(tester)), true);
+check('routing block: copy link/phone/price on hand-off', /booking_link, vendor_phone and price/.test(agentTools.promptBlock(tester)), true);
 config.agentTools.enabled = true;
-check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 2);
+check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 6);
 config.agentTools.enabled = false;
 check('has() knows the tools', [agentTools.has('queue_local_dispatch'), agentTools.has('handoff_to_concierge')], [true, false]);
 const cv = JSON.parse(agentTools.cannotVerify('down'));
@@ -91,6 +97,39 @@ check('cannotVerify tells Alice to hand off', [cv.verified, /handoff_to_concierg
 for (const t of agentTools.TOOLS) {
   check(`${t.name}: schema has required fields`, t.input_schema.required.every((r) => r in t.input_schema.properties), true);
 }
+
+console.log('\nAPIFY RESULTS (shapes from the 31 Oct UK test runs)');
+const apify = require('../src/integrations/apify');
+const slot = (t, ok = true) => ({ dateTime: `2026-11-07T${t}`, available: ok, requiresCreditCard: true });
+const bacchanalia = {
+  name: 'Bacchanalia', url: 'https://www.opentable.com/restaurant/profile/285378', priceBand: '£41 and over',
+  rating: 4.4, reviewCount: 2554, address: '1-3 Mount St', cuisines: ['Greek'],
+  availabilitySlots: { slots: ['16:00', '18:30', '18:45', '21:15', '21:30', '22:30'].map((t) => slot(t)), noTimesReasons: [] },
+};
+const ot = agentTools.mapOpenTable(bacchanalia, '19:30');
+check('OpenTable: only times within 90 min of 19:30', ot.available_times, ['18:30', '18:45']);
+check('OpenTable: booking link kept', ot.booking_link, 'https://www.opentable.com/restaurant/profile/285378');
+check('OpenTable: price band kept', ot.price, '£41 and over');
+check('OpenTable: card flag', ot.card_required, true);
+check('unavailable slot left out', agentTools.slotsNear([slot('19:30', false), slot('19:45')], '19:30'), ['19:45']);
+const everyQuarter = ['18:00', '18:15', '18:30', '18:45', '19:00', '19:15', '19:30', '19:45', '20:00', '20:15', '20:30'].map((t) => slot(t));
+check('closest 6 to 19:30, in time order', agentTools.slotsNear(everyQuarter, '19:30'), ['18:45', '19:00', '19:15', '19:30', '19:45', '20:00']);
+check('GetYourGuide search URL', agentTools.gygSearchUrl('Edinburgh whisky tasting'), 'https://www.getyourguide.com/s/?q=Edinburgh%20whisky%20tasting');
+check('tour link without tracking', agentTools.mapTour({ title: 'x', url: 'https://www.getyourguide.com/a-t1/?ranking_uuid=1&q=x' }).booking_link, 'https://www.getyourguide.com/a-t1/');
+const fullyBooked = agentTools.mapOpenTable({ name: 'X', availabilitySlots: { slots: [], noTimesReasons: ['TooFarInAdvance'] } }, '19:30');
+check('OpenTable: no slots -> empty + reason', [fullyBooked.available_times, fullyBooked.not_bookable_reason], [[], 'TooFarInAdvance']);
+const gm = agentTools.mapGooglePlace({ title: 'Maiella Worth', phone: '+44 20 3685 4559', price: '£20–30', totalScore: 4.8, reserveTableUrl: 'https://www.google.com/maps/reserve/x', website: 'https://maiellaworth.com' });
+check('Google Maps: phone + reservation link first', [gm.vendor_phone, gm.booking_link], ['+44 20 3685 4559', 'https://www.google.com/maps/reserve/x']);
+check('Google Maps: website when no reservation link', agentTools.mapGooglePlace({ title: 'A', website: 'https://a.co.uk' }).booking_link, 'https://a.co.uk');
+check('product shape', agentTools.mapProduct({ title: 'Grand Gesture Hat Box Roses', source: 'Haute Florist', price: '£170.00', link: 'https://g.co/x' }),
+  { title: 'Grand Gesture Hat Box Roses', store: 'Haute Florist', price: '£170.00', booking_link: 'https://g.co/x' });
+check('parseGbp', [agentTools.parseGbp('£1,170.50'), agentTools.parseGbp('n/a')], [1170.5, null]);
+check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
+const evt = agentTools.mapEvent({ name: 'Art Club', url: 'https://www.eventbrite.co.uk/e/1', start_date: '2026-11-07', start_time: '10:00', primary_venue: { name: 'Paxton Centre', address: { city: 'London' } }, ticket_availability: { is_free: true } });
+check('event shape', [evt.venue, evt.price, evt.time], ['Paxton Centre, London', 'Free', '10:00']);
+check('Eventbrite city slug', [agentTools.eventbriteCity('London'), agentTools.eventbriteCity('New York', 'United States')], ['united-kingdom--london', 'united-states--new-york']);
+check('apify: not configured without a token', apify.isConfigured(), Boolean(process.env.APIFY_TOKEN));
+check('apify: every actor has a USD cap', Object.values(apify.ACTORS).every((a) => a.maxChargeUsd > 0 && a.maxChargeUsd <= 0.5), true);
 
 (async () => {
   // ---- Calendar connect + trial marking, with a fake database and Airtable

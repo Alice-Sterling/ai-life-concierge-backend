@@ -52,6 +52,15 @@ const config = {
   anthropic: { apiKey: str('ANTHROPIC_API_KEY') },
   gemini: { apiKey: str('GEMINI_API_KEY') },
   tavily: { apiKey: str('TAVILY_API_KEY') },
+  // Apify runs the live-availability scrapers behind Alice's agent tools
+  // (src/integrations/apify.js). No token -> the tools say "cannot verify".
+  apify: {
+    token: str('APIFY_TOKEN'),
+    timeoutSecs: int('APIFY_TIMEOUT_SECS', 60),
+    // Cost guard: scraper runs per client per day, and for everyone per day.
+    maxRunsPerUserPerDay: int('APIFY_MAX_RUNS_PER_USER_PER_DAY', 20),
+    maxRunsPerDay: int('APIFY_MAX_RUNS_PER_DAY', 200),
+  },
   composio: {
     apiKey: str('COMPOSIO_API_KEY'),
     environment: str('PIPEDREAM_CONNECT_ENV') || str('PIPEDREAM_ENVIRONMENT'),

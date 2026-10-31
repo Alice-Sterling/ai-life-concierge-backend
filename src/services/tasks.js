@@ -24,7 +24,7 @@ const CATEGORIES = ['date_night', 'client_event', 'general'];
  * task because Airtable was down is not.
  */
 async function create(
-  { userId, sourceMessage, aiSummary, priority = 'normal', category = 'general', requiresHuman = true, assignedTo = null, requestId = null },
+  { userId, sourceMessage, aiSummary, priority = 'normal', category = 'general', requiresHuman = true, assignedTo = null, requestId = null, desk = null },
   log = logger
 ) {
   if (!PRIORITIES.includes(priority)) priority = 'normal';
@@ -47,7 +47,7 @@ async function create(
     metadata: { task_id: task.task_id, category, priority },
   }, log);
 
-  await syncToAirtable(task, log);
+  await syncToAirtable(task, log, desk);
   return task;
 }
 
@@ -91,8 +91,11 @@ async function updateStatus(taskId, status, log = logger) {
  *
  * The id is stored so later updates patch the same row instead of creating
  * duplicates, and so the two systems can be reconciled by hand if they drift.
+ *
+ * `desk` ({ bookingLink, vendorPhone, price }) is only known when the task is
+ * created; later syncs leave those Airtable cells as they are.
  */
-async function syncToAirtable(task, log = logger) {
+async function syncToAirtable(task, log = logger, desk = null) {
   if (!airtable.isConfigured()) return;
 
   try {
@@ -111,7 +114,7 @@ async function syncToAirtable(task, log = logger) {
       }, log))?.id || null
       : null;
 
-    const recordId = await airtable.syncTask(task, userRecordId, log);
+    const recordId = await airtable.syncTask(task, userRecordId, log, desk);
     if (recordId && recordId !== task.airtable_record_id) {
       await db.query(
         'UPDATE tasks SET airtable_record_id = $2 WHERE task_id = $1',

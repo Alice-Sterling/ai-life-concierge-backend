@@ -2027,6 +2027,9 @@ async function getHybridResponseFromMessages(
                     priority: tu.input?.priority || 'high',
                     sourceMessage: userMessage,
                     requestId: options.requestId || null,
+                    bookingLink: tu.input?.booking_link || null,
+                    vendorPhone: tu.input?.vendor_phone || null,
+                    price: tu.input?.price || null,
                   })
                 : null;
               payload = task
