@@ -91,6 +91,26 @@ const UK_CITIES = new Set(['London', 'Manchester', 'Edinburgh', 'Glasgow', 'Birm
 
 const airportName = (code) => (code ? AIRPORT_NAME[code] || `${code} airport` : null);
 
+/** The rail station for a UK airport, for the [Rail] answer. Heathrow depends on the terminal. */
+const AIRPORT_STATION = {
+  LHR: 'Heathrow Terminals 2 & 3 (HXX), Terminal 4 (HAF) or Terminal 5 (HWV), whichever their airline uses',
+  LGW: 'Gatwick Airport (GTW)', STN: 'Stansted Airport (SSD)', LTN: 'Luton Airport Parkway (LTN)',
+  MAN: 'Manchester Airport (MIA)', BHX: 'Birmingham International (BHI)',
+};
+const airportStation = (code) => AIRPORT_STATION[code] || null;
+
+/**
+ * Be at the airport station this long before departure: 2.5 h international,
+ * 1.5 h UK domestic.
+ * @returns {null | { at: Date, hoursBefore: number }}
+ */
+function railArriveBy(departs, { from = null, destination = null } = {}) {
+  const car = suggestedPickup(departs, { from, destination });
+  if (!car) return null;
+  const hoursBefore = car.hoursBefore === 2 ? 1.5 : 2.5;
+  return { at: new Date(new Date(departs).getTime() - hoursBefore * 3600e3), hoursBefore };
+}
+
 /** Departure city -> timezone: the car to the airport runs on the airport's clock, not the client's. */
 const CITY_TZ = {
   London: 'Europe/London', Manchester: 'Europe/London', Edinburgh: 'Europe/London', Glasgow: 'Europe/London',
@@ -139,4 +159,5 @@ function ordinalDate(date, tz = 'Europe/London') {
 
 module.exports = {
   AIRLINES, AIRPORT_CITY, detectFlight, flightNumber, airportIn, ordinalDate, airportName, airportTimezone, suggestedPickup,
+  airportStation, railArriveBy,
 };

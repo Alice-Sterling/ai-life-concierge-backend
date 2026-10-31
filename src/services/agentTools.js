@@ -21,6 +21,7 @@
  *   search_curated_experiences  tours and activities (Apify, GetYourGuide search)
  *   search_local_events         ticketed local events (Apify, Eventbrite)
  *   request_transit             Path A: a pre-filled Uber link the client books with one tap
+ *   search_rail_routes          Path A: a pre-filled National Rail planner link (live trains + fares)
  *
  * Transit (agreed with the client 30 Oct): Path A = request_transit's Uber
  * link (self-booking). Path B = the client wants us to book -> queue_local_dispatch
@@ -169,10 +170,31 @@ const SEARCH_EVENTS_TOOL = {
   },
 };
 
+const SEARCH_RAIL_TOOL = {
+  name: 'search_rail_routes',
+  description:
+    'UK train journeys, Path A: make a National Rail journey-planner link with the stations, date and time '
+    + 'filled in. The page shows the live trains and fares and the client buys there. Use it for any UK rail '
+    + 'trip, including trains to an airport (e.g. London Paddington to Heathrow Terminal 5). If the client '
+    + 'would rather the team book the tickets, call handoff_to_concierge with the journey instead.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      from: { type: 'string', description: "Departure station, e.g. 'London Paddington' (or its 3-letter code)." },
+      to: { type: 'string', description: "Arrival station, e.g. 'Heathrow Terminal 5', 'Edinburgh Waverley'." },
+      date: { type: 'string', description: 'YYYY-MM-DD' },
+      time: { type: 'string', description: 'HH:MM, 24-hour.' },
+      arrive_by: { type: 'boolean', description: 'true if the time is when they must arrive, not leave.' },
+      adults: { type: 'integer', description: 'Number of adults, default 1.' },
+    },
+    required: ['from', 'to', 'date', 'time'],
+  },
+};
+
 const TOOLS = [
   QUEUE_LOCAL_DISPATCH_TOOL, SUBMIT_PRIVATE_INQUIRY_TOOL,
   CHECK_DINING_TOOL, SOURCE_GIFT_TOOL, SEARCH_EXPERIENCES_TOOL, SEARCH_EVENTS_TOOL,
-  REQUEST_TRANSIT_TOOL,
+  REQUEST_TRANSIT_TOOL, SEARCH_RAIL_TOOL,
 ];
 const NAMES = new Set(TOOLS.map((t) => t.name));
 
@@ -200,6 +222,7 @@ function promptBlock(userId) {
 - Tours, activities and travel itineraries: call search_curated_experiences. Local cultural events: call search_local_events.
 - Cars and airport transfers: call request_transit and send the Uber link (one tap, books in their own app). Uber links cannot set a future time: for a later pickup, tell them to tap "Schedule" in Uber, or offer that the team books it.
 - If the client wants the team to book the car: confirm pickup, drop-off and time, then call queue_local_dispatch.
+- UK trains (including to an airport): call search_rail_routes and send the National Rail link (live trains and fares, they buy there). If they want the team to book the tickets, call handoff_to_concierge with the journey.
 - Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
 - If an option is relevant but not exactly what was asked (roses instead of peonies, a different area, a later time), you may include it, but say plainly how it differs.
 - EVERY option you present ends with its short "link" on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
@@ -245,6 +268,13 @@ function openTableLink(url, { date, time, party } = {}) {
 function mapOpenTable(r, time, { date, party } = {}) {
   const avail = r.availabilitySlots || {};
   const slots = avail.slots || [];
+  const times = slotsNear(slots, time);
+  // The link opens on the free time closest to the one asked (Rome test 31 Oct:
+  // Alice offered 19:00, the link opened at the asked 19:30).
+  const want = hhmmToMinutes(time);
+  const closest = times.length && want != null
+    ? times.reduce((a, b) => (Math.abs(hhmmToMinutes(b) - want) < Math.abs(hhmmToMinutes(a) - want) ? b : a))
+    : time;
   return {
     name: r.name,
     cuisine: (r.cuisines || []).join(', ') || null,
@@ -253,8 +283,9 @@ function mapOpenTable(r, time, { date, party } = {}) {
     reviews: r.reviewCount ?? null,
     address: [r.address, r.postalCode].filter(Boolean).join(', ') || null,
     vendor_phone: r.phone || r.phoneNumber || r.profile?.phone || null,
-    booking_link: openTableLink(r.url, { date, time, party }),
-    available_times: slotsNear(slots, time),
+    booking_link: openTableLink(r.url, { date, time: closest, party }),
+    link_opens_at: times.length ? closest : undefined,
+    available_times: times,
     card_required: slots.some((s) => s.requiresCreditCard) || undefined,
     not_bookable_reason: (avail.noTimesReasons || [])[0] || undefined,
   };
@@ -428,7 +459,56 @@ function uberLink({ pickup = null, drop, clientId = config.uber.clientId }) {
   return `https://m.uber.com/looking?${params}`;
 }
 
+/**
+ * National Rail's journey planner with the trip filled in (format checked in a
+ * browser 31 Oct: KGX -> EDB, Sat 7 Nov 09:00 showed live trains and fares).
+ * Station names do not work there, only 3-letter CRS codes.
+ */
+function nationalRailLink({ from, to, date, time, arriveBy = false, adults = 1 }) {
+  const [y, m, d] = String(date).split('-');
+  const [hh, mm] = String(time).split(':');
+  const params = new URLSearchParams({
+    type: 'single',
+    origin: from,
+    destination: to,
+    leavingType: arriveBy ? 'arriving' : 'departing',
+    leavingDate: `${d}${m}${y.slice(2)}`,
+    leavingHour: hh.padStart(2, '0'),
+    leavingMin: (mm || '00').padStart(2, '0'),
+    adults: String(Math.min(Math.max(Number.parseInt(adults, 10) || 1, 1), 9)),
+    extendedSearch: 'false',
+  });
+  return `https://www.nationalrail.co.uk/journey-planner/?${params}`;
+}
+
 const HANDLERS = {
+  // Rail, Path A: the planner link. Path B is a hand-off (the desk books the tickets).
+  async search_rail_routes(user, input, ctx, log) {
+    if (!isDate(input.date) || hhmmToMinutes(input.time) == null) {
+      return { ok: false, error: 'date must be YYYY-MM-DD and time HH:MM.' };
+    }
+    const [from, to] = await Promise.all([geocode.findStation(input.from, log), geocode.findStation(input.to, log)]);
+    if (!from || !to) {
+      return {
+        ok: false,
+        not_found: !from ? input.from : input.to,
+        note: 'That station could not be found. Ask the client for the exact station name, or offer that the team '
+          + 'books the tickets (handoff_to_concierge).',
+      };
+    }
+    return {
+      ok: true,
+      from: `${from.name} (${from.code})`,
+      to: `${to.name} (${to.code})`,
+      booking_link: nationalRailLink({
+        from: from.code, to: to.code, date: input.date, time: input.time, arriveBy: input.arrive_by, adults: input.adults,
+      }),
+      note: 'Send the short "link": it opens National Rail with this journey, showing the live trains and fares, '
+        + 'and they buy there. You cannot see the times or prices, so do not quote any. '
+        + 'Then offer that the team can book the tickets for them instead (handoff_to_concierge).',
+    };
+  },
+
   // Path B: the team books the car, so the chat goes to the desk (human mode).
   async queue_local_dispatch(user, input, ctx, log) {
     const summary = [
@@ -706,5 +786,5 @@ module.exports = {
   TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run,
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
-  openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation, addShortLinks,
+  openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation, addShortLinks, nationalRailLink,
 };

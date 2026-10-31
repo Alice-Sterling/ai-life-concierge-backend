@@ -137,12 +137,23 @@ function transitUberNote(meta, clientTz) {
     + '4. Offer that the team can book it for them instead.';
 }
 
+/** [Rail] on the transit ping: Path A is the National Rail link, Path B the desk books the tickets. */
 function transitRailNote(meta, clientTz) {
   const tz = flights.airportTimezone(meta.from_airport) || clientTz;
-  return `The client just tapped "Rail" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar). `
-    + 'Rail tickets are booked by the concierge team. Confirm in one short message the station or address they '
-    + 'travel from and when they want to arrive at the airport (suggest a time), then call handoff_to_concierge '
-    + 'with the full journey details.';
+  const arrive = flights.railArriveBy(meta.departs, { from: meta.from_airport, destination: meta.destination });
+  const station = flights.airportStation(meta.from_airport);
+  return `The client just tapped "Rail" on Alice's ping about their ${flightLine(meta, tz)} (from their calendar; `
+    + `times are ${tz} time). This is a NEW trip: do not reuse anything from earlier in the chat.\n`
+    + '1. In this reply, propose arriving at the airport by '
+    + (arrive
+      ? `${localWhen(arrive.at, tz)} (${arrive.hoursBefore} hours before departure)`
+      : 'about 2.5 hours before an international departure, 1.5 before a domestic one')
+    + ', and ask which station they start from, unless they already said.\n'
+    + `2. Then call search_rail_routes from that station to ${station || 'the airport station'}, arrive_by true, `
+    + 'with that date and time.'
+    + (station ? '' : ' If the airport has no rail station, say so and offer an Uber instead (request_transit).')
+    + '\n3. Send the link (live trains and fares, they buy there) and offer that the team can book the tickets '
+    + 'for them instead (handoff_to_concierge).';
 }
 
 /**

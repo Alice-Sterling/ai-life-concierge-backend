@@ -104,6 +104,61 @@ async function findPlace(query, log = logger) {
   return null;
 }
 
+/**
+ * UK rail stations and their National Rail codes (CRS), 2,609 of them, from
+ * github.com/davwheat/uk-railway-stations (ODbL; attribution: davwheat /
+ * National Rail open data), slimmed to [name, code] in src/data/uk-stations.json.
+ * Chosen over OSM search, which returned Brighton's car park and bus stops
+ * instead of the station (31 Oct).
+ */
+const STATIONS = require('../data/uk-stations.json');
+
+/** "London King's Cross station" -> "kings cross"; "Heathrow T5" -> "heathrow terminal 5". */
+function stationKey(name) {
+  return String(name || '').toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/\bt(\d)\b/g, 'terminal $1')
+    .replace(/\bterminals? (\d) and (\d)\b/g, 'terminals $1 and $2')
+    .replace(/\b(london|station|rail|railway|train|the)\b/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const STATION_INDEX = STATIONS.map(([name, code]) => ({ name, code, key: stationKey(name) }));
+
+/** A bare city name means its main station ("Edinburgh" -> Waverley, not Edinburgh Park). */
+const MAIN_STATION = {
+  edinburgh: 'EDB', manchester: 'MAN', glasgow: 'GLC', birmingham: 'BHM', liverpool: 'LIV', leeds: 'LDS',
+  bristol: 'BRI', cardiff: 'CDF', newcastle: 'NCL', sheffield: 'SHF', nottingham: 'NOT', cambridge: 'CBG',
+  reading: 'RDG', southampton: 'SOU', heathrow: 'HXX',
+};
+
+/**
+ * A UK station's CRS code from a code or a name: exact name first, then the
+ * shortest name that starts with it, then the shortest that contains it.
+ * @returns {Promise<{code: string, name: string}|null>}
+ */
+async function findStation(query) {
+  const q = String(query || '').trim();
+  if (/^[A-Z]{3}$/.test(q)) {
+    const known = STATION_INDEX.find((s) => s.code === q);
+    return { code: q, name: known ? known.name : q };
+  }
+  const key = stationKey(q);
+  if (!key) return null;
+  if (MAIN_STATION[key]) {
+    const main = STATION_INDEX.find((s) => s.code === MAIN_STATION[key]);
+    if (main) return { code: main.code, name: main.name };
+  }
+  const shortest = (list) => list.sort((a, b) => a.key.length - b.key.length)[0];
+  const hit = STATION_INDEX.find((s) => s.key === key)
+    || shortest(STATION_INDEX.filter((s) => s.key.startsWith(`${key} `)))
+    || shortest(STATION_INDEX.filter((s) => s.key.includes(key)));
+  return hit ? { code: hit.code, name: hit.name } : null;
+}
+
 /** Great-circle distance in miles. */
 function milesBetween(a, b) {
   const rad = (d) => (d * Math.PI) / 180;
@@ -113,4 +168,4 @@ function milesBetween(a, b) {
   return 3958.8 * 2 * Math.asin(Math.sqrt(h));
 }
 
-module.exports = { lookup, findPlace, attemptsFor, parseResult, milesBetween };
+module.exports = { lookup, findPlace, findStation, attemptsFor, parseResult, milesBetween };

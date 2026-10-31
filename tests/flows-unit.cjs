@@ -167,13 +167,14 @@ check('client: no tools while off', agentTools.definitionsFor(stranger).length, 
 check('client: no prompt block while off', agentTools.promptBlock(stranger), '');
 check('test account: all tools', agentTools.definitionsFor(tester).map((t) => t.name), [
   'queue_local_dispatch', 'submit_private_inquiry', 'check_dining_availability',
-  'source_retail_gift', 'search_curated_experiences', 'search_local_events', 'request_transit',
+  'source_retail_gift', 'search_curated_experiences', 'search_local_events', 'request_transit', 'search_rail_routes',
 ]);
+check('routing block: rail via search_rail_routes', /search_rail_routes/.test(agentTools.promptBlock(tester)), true);
 check('test account: routing block', /submit_private_inquiry/.test(agentTools.promptBlock(tester)), true);
 check('routing block: dining checked first', /check_dining_availability first/.test(agentTools.promptBlock(tester)), true);
 check('routing block: copy link/phone/price on hand-off', /booking_link, vendor_phone and price/.test(agentTools.promptBlock(tester)), true);
 config.agentTools.enabled = true;
-check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 7);
+check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 8);
 config.agentTools.enabled = false;
 check('has() knows the tools', [agentTools.has('queue_local_dispatch'), agentTools.has('handoff_to_concierge')], [true, false]);
 const cv = JSON.parse(agentTools.cannotVerify('down'));
@@ -193,6 +194,31 @@ const bacchanalia = {
 const ot = agentTools.mapOpenTable(bacchanalia, '19:30');
 check('OpenTable: only times within 90 min of 19:30', ot.available_times, ['18:30', '18:45']);
 check('OpenTable: booking link kept', ot.booking_link, 'https://www.opentable.com/restaurant/profile/285378');
+const otDated = agentTools.mapOpenTable(bacchanalia, '19:30', { date: '2026-11-07', party: 2 });
+check('OpenTable link opens at the closest free time (18:45), not the asked 19:30',
+  [otDated.link_opens_at, otDated.booking_link], ['18:45', 'https://www.opentable.com/restaurant/profile/285378?covers=2&dateTime=2026-11-07T18%3A45']);
+check('OpenTable link: nothing free -> the asked time', agentTools.mapOpenTable({ ...bacchanalia, availabilitySlots: { slots: [] } }, '19:30', { date: '2026-11-07' }).booking_link,
+  'https://www.opentable.com/restaurant/profile/285378?covers=2&dateTime=2026-11-07T19%3A30');
+
+console.log('\nRAIL');
+check('National Rail link as checked in a browser (KGX -> EDB, Sat 7 Nov 09:00)',
+  agentTools.nationalRailLink({ from: 'KGX', to: 'EDB', date: '2026-11-07', time: '09:00' }),
+  'https://www.nationalrail.co.uk/journey-planner/?type=single&origin=KGX&destination=EDB&leavingType=departing&leavingDate=071126&leavingHour=09&leavingMin=00&adults=1&extendedSearch=false');
+check('National Rail link: arrive by, 2 adults', new URL(agentTools.nationalRailLink({ from: 'PAD', to: 'HWV', date: '2026-11-07', time: '6:00', arriveBy: true, adults: 2 })).searchParams.toString(),
+  'type=single&origin=PAD&destination=HWV&leavingType=arriving&leavingDate=071126&leavingHour=06&leavingMin=00&adults=2&extendedSearch=false');
+(async () => {
+  const geo = require('../src/integrations/geocode');
+  check('station: a code passes through, named from the list', await geo.findStation('KGX'), { code: 'KGX', name: 'London Kings Cross' });
+  const codes = [];
+  for (const s of ['Heathrow Terminal 5 station', 'Heathrow T5', 'Brighton', "King's Cross", 'Edinburgh', 'Manchester', 'Manchester Airport', 'Bath', 'Nowhere Junction XYZ']) {
+    codes.push((await geo.findStation(s))?.code || null);
+  }
+  check('station names -> codes (Brighton was the OSM miss; a bare city = its main station)', codes,
+    ['HWV', 'HWV', 'BTN', 'KGX', 'EDB', 'MAN', 'MIA', 'BTH', null]);
+})();
+const railNote = replies.transitRailNote({ flight: 'BA117', destination: 'New York', from_airport: 'LHR', departs: '2026-11-07T10:15:00Z' }, 'Asia/Dubai');
+check('[Rail] note: arrive 2.5 h before, London time, rail tool, team option', [/07:45/, /search_rail_routes/, /arrive_by true/, /HWV/, /handoff_to_concierge/].every((re) => re.test(railNote)), true);
+check('[Rail] note: airport without a station -> offer Uber', /request_transit/.test(replies.transitRailNote({ flight: 'BA1', destination: 'Paris', from_airport: 'EDI', departs: '2026-11-07T10:15:00Z' }, 'Europe/London')), true);
 check('OpenTable: price band kept', ot.price, '£41 and over');
 check('OpenTable: card flag', ot.card_required, true);
 check('unavailable slot left out', agentTools.slotsNear([slot('19:30', false), slot('19:45')], '19:30'), ['19:45']);
