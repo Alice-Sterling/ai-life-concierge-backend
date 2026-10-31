@@ -134,8 +134,9 @@ check('shop link: tracking removed', agentTools.cleanShopUrl('https://www.blosso
 check('OpenTable link opens on the date, time and guests', agentTools.openTableLink('https://www.opentable.com/restaurant/profile/286230', { date: '2026-11-06', time: '19:30', party: 2 }),
   'https://www.opentable.com/restaurant/profile/286230?covers=2&dateTime=2026-11-06T19%3A30');
 check('OpenTable link: no date -> plain page', agentTools.openTableLink('https://www.opentable.com/restaurant/profile/1', {}), 'https://www.opentable.com/restaurant/profile/1');
-check('routing block: link under every option', /booking_link on its own line/.test(agentTools.promptBlock(tester)), true);
-check('routing block: WhatsApp bold', /\*single asterisks\*/.test(agentTools.promptBlock(tester)), true);
+check('routing block: short link under every option', /short "link" on its own line/.test(agentTools.promptBlock(tester)), true);
+check('routing block: no markdown links', /never \[text\]\(url\)/.test(agentTools.promptBlock(tester)), true);
+check('routing block: bold style left to Alice (Tim likes **double**)', /single asterisks/.test(agentTools.promptBlock(tester)), false);
 check('routing block: near-matches named, not hidden', /say plainly how it differs/.test(agentTools.promptBlock(tester)), true);
 
 console.log('\nTRANSIT');
@@ -155,6 +156,22 @@ const loc = agentTools.uberLocation(t5, 'Heathrow T5');
 check('Uber location fields (Uber docs names)', Object.keys(loc), ['latitude', 'longitude', 'addressLine1', 'addressLine2']);
 const link = new URL(agentTools.uberLink({ drop: loc, clientId: null }));
 check('Uber link base', `${link.origin}${link.pathname}`, 'https://m.uber.com/looking');
+
+console.log('\nSHORT LINKS');
+const shortLinks = require('../src/services/shortLinks');
+const codes = new Set(Array.from({ length: 200 }, () => shortLinks.newCode()));
+check('codes: 8 URL-safe characters', [...codes].every((c) => shortLinks.CODE.test(c)), true);
+check('codes: no repeats in 200', codes.size, 200);
+check('only web links are shortened', [shortLinks.isWebUrl('https://a.co/x'), shortLinks.isWebUrl('javascript:alert(1)'), shortLinks.isWebUrl('')], [true, false, false]);
+(async () => {
+  const fake = async (url) => `https://x.app/go/${url.length}`;
+  const r = await agentTools.addShortLinks({ ok: true, options: [{ booking_link: 'https://shop/a' }, { name: 'no link' }] }, 'u', null, fake);
+  check('every option with a booking_link gets a short link; full link kept', [r.options[0].link, r.options[0].booking_link, 'link' in r.options[1]], ['https://x.app/go/14', 'https://shop/a', false]);
+  const tr = await agentTools.addShortLinks({ ok: true, booking_link: 'https://m.uber.com/looking?x' }, 'u', null, fake);
+  check('transit result gets a short link too', tr.link, 'https://x.app/go/28');
+  const none = await shortLinks.shorten('https://m.uber.com/looking?x', {}, null);
+  check('no PUBLIC_BASE_URL -> full link (never a dead one)', none, config.publicBaseUrl ? none : 'https://m.uber.com/looking?x');
+})();
 check('Uber link: drop[0] is the JSON location', JSON.parse(link.searchParams.get('drop[0]')).latitude, 51.4723);
 check('Uber link: no pickup -> current location (param left out)', link.searchParams.has('pickup'), false);
 check('Uber link: client_id only when set', new URL(agentTools.uberLink({ drop: loc, clientId: 'abc' })).searchParams.get('client_id'), 'abc');

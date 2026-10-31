@@ -26,6 +26,7 @@ const adminRoutes = require('./routes/admin');
 const stripeRoutes = require('./routes/stripe');
 const webhookRoutes = require('./routes/webhook');
 const portalRoutes = require('./routes/portal');
+const linkRoutes = require('./routes/links');
 
 function createApp() {
   const app = express();
@@ -62,6 +63,9 @@ function createApp() {
   // search engines stop asking. Declared before the portal router so it is not
   // shadowed by it.
   app.get('/portal', (req, res) => res.redirect(301, '/'));
+
+  // Short links Alice sends in WhatsApp: /go/<code> -> the booking page.
+  app.use(linkRoutes);
 
   app.use('/admin', adminLimiter(), adminAuth(), adminRoutes);
 

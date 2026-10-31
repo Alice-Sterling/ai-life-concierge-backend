@@ -31,6 +31,7 @@ const users = require('./users');
 const tasks = require('./tasks');
 const apify = require('../integrations/apify');
 const geocode = require('../integrations/geocode');
+const shortLinks = require('./shortLinks');
 const email = require('../integrations/email');
 const handoff = require('./handoff');
 const { config } = require('../config');
@@ -201,8 +202,8 @@ function promptBlock(userId) {
 - If the client wants the team to book the car: confirm pickup, drop-off and time, then call queue_local_dispatch.
 - Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
 - If an option is relevant but not exactly what was asked (roses instead of peonies, a different area, a later time), you may include it, but say plainly how it differs.
-- EVERY option you present ends with its booking_link on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
-- WhatsApp formatting: bold is *single asterisks*; never **double**, never markdown headings or [text](url) links.
+- EVERY option you present ends with its short "link" on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
+- Links are plain URLs, never [text](url) markdown: WhatsApp does not show those.
 - When the client picks one, call handoff_to_concierge and copy that option's booking_link, vendor_phone and price from the tool result into it.
 - If a tool says it could not verify, do not present options: tell the client the team will check personally and call handoff_to_concierge.
 `;
@@ -476,10 +477,10 @@ const HANDLERS = {
     });
     return {
       ok: true,
-      uber_link: link,
+      booking_link: link,
       pickup: pick ? pick.address : "the client's current location",
       dropoff: drop.address,
-      note: 'Send the uber_link on its own line: one tap opens Uber with the trip filled in, and they book it. '
+      note: 'Send the short "link" on its own line: one tap opens Uber with the trip filled in, and they book it. '
         + (rough.length
           ? 'The map found the postcode or street, not the exact venue: ask them to check the pin in Uber before booking. '
           : '')
@@ -668,6 +669,19 @@ const HANDLERS = {
 };
 
 /**
+ * Give every booking_link in a tool result a short twin, `link`, for the
+ * client's WhatsApp message (src/services/shortLinks.js). booking_link stays
+ * the full page for the desk's Airtable task.
+ */
+async function addShortLinks(result, userId, log, shorten = shortLinks.shorten) {
+  const items = [result, ...(Array.isArray(result?.options) ? result.options : [])];
+  await Promise.all(items.map(async (item) => {
+    if (item && item.booking_link) item.link = await shorten(item.booking_link, { userId }, log);
+  }));
+  return result;
+}
+
+/**
  * Run one tool call for Alice.
  * @returns {Promise<string>} the tool_result content (JSON)
  */
@@ -677,7 +691,9 @@ async function run(name, input, { userId, sourceMessage = null, requestId = null
   try {
     const user = await users.findById(userId, toolLog);
     if (!user) return JSON.stringify({ ok: false, error: 'User not found.' });
-    const result = await HANDLERS[name](user, input || {}, { sourceMessage, requestId }, toolLog);
+    const result = await addShortLinks(
+      await HANDLERS[name](user, input || {}, { sourceMessage, requestId }, toolLog), user.id, toolLog
+    );
     toolLog.info('agent_tool.done', { ok: result.ok !== false });
     return JSON.stringify(result);
   } catch (err) {
@@ -690,5 +706,5 @@ module.exports = {
   TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run,
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
-  openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation,
+  openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation, addShortLinks,
 };
