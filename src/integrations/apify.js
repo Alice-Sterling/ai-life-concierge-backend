@@ -30,8 +30,11 @@ const ACTORS = {
   // Google Maps places with phone, rating, price level, reservation link:
   // $0.003/place. Fallback when OpenTable has nothing.
   googleMaps: { id: 'compass/crawler-google-places', maxChargeUsd: 0.5 },
-  // Google Shopping UK products with price + store: $0.0035/result, 4 s.
-  googleShopping: { id: 'damilo/google-shopping-apify', maxChargeUsd: 0.5 },
+  // Google Shopping UK with each product's offer opened: the shop's own link
+  // (via Google's redirect), delivery date and fee. $0.0044/result + start,
+  // stops at maxItems: 2 items $0.01, 25 s. (damilo/google-shopping-apify was
+  // dropped: Google links only, and it returned 40 products for 10 asked, $0.14.)
+  googleShopping: { id: 'epctex/google-shopping-scraper', maxChargeUsd: 0.5 },
   // Tours from a GetYourGuide search page (its free-text "search" input ignored
   // the term in the 31 Oct test): $0.005 start + $0.002/tour, 20 s.
   tours: { id: 'memo23/tours-activities-scraper', maxChargeUsd: 0.5 },

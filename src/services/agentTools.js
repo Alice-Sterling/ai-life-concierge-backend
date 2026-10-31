@@ -17,7 +17,7 @@
  *   queue_local_dispatch        no car service covers the trip -> the desk arranges a local taxi
  *   submit_private_inquiry      private dining / events -> an inquiry drafted for the desk to send
  *   check_dining_availability   live OpenTable tables (Apify); Google Maps venues as a fallback
- *   source_retail_gift          UK gifts and flowers with price and store (Apify, Google Shopping)
+ *   source_retail_gift          UK gifts and flowers: price, shop link, delivery (Apify, Google Shopping)
  *   search_curated_experiences  tours and activities (Apify, GetYourGuide search)
  *   search_local_events         ticketed local events (Apify, Eventbrite)
  */
@@ -93,7 +93,8 @@ const SOURCE_GIFT_TOOL = {
   description:
     'Find real, currently listed gifts or flowers from UK shops, with price and store. Use it before you '
     + 'suggest any gift or bouquet. Build the search from what you know about the recipient (style, budget, '
-    + 'brands they like). Delivery dates are not checked by this tool: the team confirms delivery at checkout.',
+    + 'brands they like). Returns the shop\'s own product link and, where the shop shows it, the delivery date '
+    + 'and fee.',
   input_schema: {
     type: 'object',
     properties: {
@@ -168,10 +169,12 @@ function promptBlock(userId) {
 ### AGENT TOOLS (verify before you pitch)
 - Restaurants for 1 to 6 guests: call check_dining_availability first. Present only places it returns with an available time, and name the exact time.
 - Members' clubs, private dining rooms, or more than 6 guests: call submit_private_inquiry. Do NOT check live availability for these.
-- Gifts and flowers: call source_retail_gift first. Give the price and the shop; say the team confirms the delivery date.
+- Gifts and flowers: call source_retail_gift first. Give the price, the shop and the delivery the shop shows (or say the team confirms the delivery date).
 - Tours, activities and travel itineraries: call search_curated_experiences. Local cultural events: call search_local_events.
 - A car the client has confirmed that no car service can quote (no coverage, or they want a local firm): call queue_local_dispatch.
 - Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
+- EVERY option you present ends with its booking_link on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
+- WhatsApp formatting: bold is *single asterisks*; never **double**, never markdown headings or [text](url) links.
 - When the client picks one, call handoff_to_concierge and copy that option's booking_link, vendor_phone and price from the tool result into it.
 - If a tool says it could not verify, do not present options: tell the client the team will check personally and call handoff_to_concierge.
 `;
@@ -199,8 +202,18 @@ function slotsNear(slots, time, windowMin = 90) {
     .sort();
 }
 
+/** OpenTable page that opens on the asked date, time and party size, so the client can book in one tap. */
+function openTableLink(url, { date, time, party } = {}) {
+  if (!url) return null;
+  if (!date || !time) return url;
+  const u = new URL(url);
+  u.searchParams.set('covers', String(party || 2));
+  u.searchParams.set('dateTime', `${date}T${time}`);
+  return u.toString();
+}
+
 /** One OpenTable restaurant (rl1987/opentable-api-scraper) -> an option. */
-function mapOpenTable(r, time) {
+function mapOpenTable(r, time, { date, party } = {}) {
   const avail = r.availabilitySlots || {};
   const slots = avail.slots || [];
   return {
@@ -211,7 +224,7 @@ function mapOpenTable(r, time) {
     reviews: r.reviewCount ?? null,
     address: [r.address, r.postalCode].filter(Boolean).join(', ') || null,
     vendor_phone: r.phone || r.phoneNumber || r.profile?.phone || null,
-    booking_link: r.url || null,
+    booking_link: openTableLink(r.url, { date, time, party }),
     available_times: slotsNear(slots, time),
     card_required: slots.some((s) => s.requiresCreditCard) || undefined,
     not_bookable_reason: (avail.noTimesReasons || [])[0] || undefined,
@@ -237,15 +250,50 @@ const parseGbp = (s) => {
   return Number.isFinite(n) ? n : null;
 };
 
-/** One Google Shopping product (damilo/google-shopping-apify) -> an option. */
+/**
+ * One Google Shopping product (epctex/google-shopping-scraper, with offer
+ * details) -> an option. merchantLink is Google's redirect to the shop's own
+ * product page; resolveShopLink() turns it into that page.
+ */
 function mapProduct(p) {
   return {
-    title: p.title,
-    store: p.source || null,
+    title: p.productName,
+    store: p.merchantName || null,
     price: p.price || null,
-    rating: p.rating ?? undefined,
-    booking_link: p.link || null,
+    delivery: [p.deliveryInfo, p.deliveryFee && !String(p.deliveryInfo || '').includes(p.deliveryFee) ? `fee ${p.deliveryFee}` : null]
+      .filter(Boolean).join(', ') || null,
+    rating: p.reviewsScore ?? undefined,
+    booking_link: p.merchantLink || p.productLink || null,
   };
+}
+
+/** Drop tracking parameters Google adds to shop links. */
+function cleanShopUrl(url) {
+  try {
+    const u = new URL(url);
+    for (const k of [...u.searchParams.keys()]) {
+      if (k === 'srsltid' || k.startsWith('utm_') || k === 'gclid') u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Google's /goto?url=... link -> the shop's product page (one redirect, not
+ * followed further). Anything else, or a failure, keeps the link as it was:
+ * a Google link still works for the client, it is just less direct.
+ */
+async function resolveShopLink(link) {
+  if (!link || !/^https:\/\/www\.google\.[a-z.]+\/goto\?/.test(link)) return link;
+  try {
+    const res = await fetch(link, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
+    const to = res.headers.get('location');
+    return to && /^https?:\/\//.test(to) ? cleanShopUrl(to) : link;
+  } catch {
+    return link;
+  }
 }
 
 /** One tour (memo23/tours-activities-scraper) -> an option. */
@@ -405,7 +453,7 @@ const HANDLERS = {
       maxItems: 6,
     }, { userId: user.id, maxItems: 6 }, log);
 
-    const restaurants = found.map((r) => mapOpenTable(r, time));
+    const restaurants = found.map((r) => mapOpenTable(r, time, { date: input.date, party }));
     const open = restaurants.filter((r) => r.available_times.length);
     if (open.length) {
       return {
@@ -451,22 +499,30 @@ const HANDLERS = {
   async source_retail_gift(user, input, ctx, log) {
     if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live product search is not set up yet.'));
     const found = await apify.run('googleShopping', {
-      query: input.search, country: 'gb', language: 'en', num: '10', max_pages: 1, date_range: 'anytime',
-    }, { userId: user.id, maxItems: 20 }, log);
+      queries: [input.search],
+      countryCode: 'gb',
+      maxItems: 5,
+      includeSponsoredResults: false,
+      // Opens each product's offer: the shop's own link, delivery date and fee.
+      includeComparisonPrices: true,
+      includeExtraProductDetails: true,
+    }, { userId: user.id, maxItems: 5 }, log);
 
     const max = Number(input.budget_max_gbp);
     const products = found
       .map(mapProduct)
       .filter((p) => p.title && p.price)
       .filter((p) => !(max > 0) || (parseGbp(p.price) ?? Infinity) <= max)
-      .slice(0, 6);
+      .slice(0, 4);
     if (!products.length) return JSON.parse(cannotVerify('No listed products matched that search and budget.'));
+    await Promise.all(products.map(async (p) => { p.booking_link = await resolveShopLink(p.booking_link); }));
     return {
       ok: true,
       verified: true,
       source: 'Google Shopping UK, live listings',
       options: products,
-      delivery: 'not checked: say the team confirms the delivery date at checkout',
+      delivery_note: 'Where "delivery" is given it is what the shop shows today; otherwise say the team confirms '
+        + 'the delivery date. Either way the team double-checks at checkout.',
       note: PICK_NOTE,
     };
   },
@@ -537,4 +593,5 @@ module.exports = {
   TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run,
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
+  openTableLink, cleanShopUrl, resolveShopLink,
 };

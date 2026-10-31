@@ -121,8 +121,21 @@ check('OpenTable: no slots -> empty + reason', [fullyBooked.available_times, ful
 const gm = agentTools.mapGooglePlace({ title: 'Maiella Worth', phone: '+44 20 3685 4559', price: '£20–30', totalScore: 4.8, reserveTableUrl: 'https://www.google.com/maps/reserve/x', website: 'https://maiellaworth.com' });
 check('Google Maps: phone + reservation link first', [gm.vendor_phone, gm.booking_link], ['+44 20 3685 4559', 'https://www.google.com/maps/reserve/x']);
 check('Google Maps: website when no reservation link', agentTools.mapGooglePlace({ title: 'A', website: 'https://a.co.uk' }).booking_link, 'https://a.co.uk');
-check('product shape', agentTools.mapProduct({ title: 'Grand Gesture Hat Box Roses', source: 'Haute Florist', price: '£170.00', link: 'https://g.co/x' }),
-  { title: 'Grand Gesture Hat Box Roses', store: 'Haute Florist', price: '£170.00', booking_link: 'https://g.co/x' });
+check('product shape: shop link, delivery', agentTools.mapProduct({
+  productName: 'Pink Peonies & Roses', merchantName: 'Blossoming Gifts', price: '£44.99',
+  merchantLink: 'https://www.google.co.uk/goto?url=CAES', productLink: 'https://www.google.co.uk/search?q=x',
+  deliveryInfo: 'Delivery between Saturday – Monday £4.99', deliveryFee: '£4.99',
+}), {
+  title: 'Pink Peonies & Roses', store: 'Blossoming Gifts', price: '£44.99',
+  delivery: 'Delivery between Saturday – Monday £4.99', booking_link: 'https://www.google.co.uk/goto?url=CAES',
+});
+check('product: fee added when the delivery text lacks it', agentTools.mapProduct({ productName: 'x', price: '£1', deliveryInfo: 'Next day', deliveryFee: '£6.95' }).delivery, 'Next day, fee £6.95');
+check('shop link: tracking removed', agentTools.cleanShopUrl('https://www.blossominggifts.com/pomegranate-rose-peony-bg?srsltid=AYCX9&utm_source=g&size=l'), 'https://www.blossominggifts.com/pomegranate-rose-peony-bg?size=l');
+check('OpenTable link opens on the date, time and guests', agentTools.openTableLink('https://www.opentable.com/restaurant/profile/286230', { date: '2026-11-06', time: '19:30', party: 2 }),
+  'https://www.opentable.com/restaurant/profile/286230?covers=2&dateTime=2026-11-06T19%3A30');
+check('OpenTable link: no date -> plain page', agentTools.openTableLink('https://www.opentable.com/restaurant/profile/1', {}), 'https://www.opentable.com/restaurant/profile/1');
+check('routing block: link under every option', /booking_link on its own line/.test(agentTools.promptBlock(tester)), true);
+check('routing block: WhatsApp bold', /\*single asterisks\*/.test(agentTools.promptBlock(tester)), true);
 check('parseGbp', [agentTools.parseGbp('£1,170.50'), agentTools.parseGbp('n/a')], [1170.5, null]);
 check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
 const evt = agentTools.mapEvent({ name: 'Art Club', url: 'https://www.eventbrite.co.uk/e/1', start_date: '2026-11-07', start_time: '10:00', primary_venue: { name: 'Paxton Centre', address: { city: 'London' } }, ticket_availability: { is_free: true } });
