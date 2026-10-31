@@ -61,6 +61,9 @@ const config = {
     maxRunsPerUserPerDay: int('APIFY_MAX_RUNS_PER_USER_PER_DAY', 20),
     maxRunsPerDay: int('APIFY_MAX_RUNS_PER_DAY', 200),
   },
+  // request_transit's Uber link. Optional: the link works without it; with
+  // the client's Uber developer app id, Uber can attribute the trips.
+  uber: { clientId: str('UBER_CLIENT_ID') },
   composio: {
     apiKey: str('COMPOSIO_API_KEY'),
     environment: str('PIPEDREAM_CONNECT_ENV') || str('PIPEDREAM_ENVIRONMENT'),

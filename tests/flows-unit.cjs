@@ -83,13 +83,13 @@ check('client: no tools while off', agentTools.definitionsFor(stranger).length, 
 check('client: no prompt block while off', agentTools.promptBlock(stranger), '');
 check('test account: all tools', agentTools.definitionsFor(tester).map((t) => t.name), [
   'queue_local_dispatch', 'submit_private_inquiry', 'check_dining_availability',
-  'source_retail_gift', 'search_curated_experiences', 'search_local_events',
+  'source_retail_gift', 'search_curated_experiences', 'search_local_events', 'request_transit',
 ]);
 check('test account: routing block', /submit_private_inquiry/.test(agentTools.promptBlock(tester)), true);
 check('routing block: dining checked first', /check_dining_availability first/.test(agentTools.promptBlock(tester)), true);
 check('routing block: copy link/phone/price on hand-off', /booking_link, vendor_phone and price/.test(agentTools.promptBlock(tester)), true);
 config.agentTools.enabled = true;
-check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 6);
+check('switched on: everyone gets them', agentTools.definitionsFor(stranger).length, 7);
 config.agentTools.enabled = false;
 check('has() knows the tools', [agentTools.has('queue_local_dispatch'), agentTools.has('handoff_to_concierge')], [true, false]);
 const cv = JSON.parse(agentTools.cannotVerify('down'));
@@ -136,6 +136,29 @@ check('OpenTable link opens on the date, time and guests', agentTools.openTableL
 check('OpenTable link: no date -> plain page', agentTools.openTableLink('https://www.opentable.com/restaurant/profile/1', {}), 'https://www.opentable.com/restaurant/profile/1');
 check('routing block: link under every option', /booking_link on its own line/.test(agentTools.promptBlock(tester)), true);
 check('routing block: WhatsApp bold', /\*single asterisks\*/.test(agentTools.promptBlock(tester)), true);
+check('routing block: near-matches named, not hidden', /say plainly how it differs/.test(agentTools.promptBlock(tester)), true);
+
+console.log('\nTRANSIT');
+const geocode = require('../src/integrations/geocode');
+const t5 = geocode.parseResult({ lat: '51.4723', lon: '-0.4886', name: 'Terminal 5', display_name: 'Terminal 5, Heathrow, London, TW6 2GA' });
+check('Nominatim result parsed', t5, { lat: 51.4723, lon: -0.4886, name: 'Terminal 5', address: 'Terminal 5, Heathrow, London, TW6 2GA' });
+check('Nominatim: nothing found -> null', geocode.parseResult(undefined), null);
+check('Charing Cross to Heathrow T5 is about 16 miles', Math.round(geocode.milesBetween({ lat: 51.5074, lon: -0.1278 }, t5)), 16);
+check('address attempts: full, no "The", postcode, street', geocode.attemptsFor('The Savoy, Strand, London WC2R 0EZ'), [
+  { q: 'The Savoy, Strand, London WC2R 0EZ', match: 'exact' },
+  { q: 'Savoy, Strand, London WC2R 0EZ', match: 'exact' },
+  { q: 'WC2R 0EZ', match: 'postcode' },
+  { q: 'Strand, London WC2R 0EZ', match: 'street' },
+]);
+check('address attempts: plain place -> just itself', geocode.attemptsFor('Heathrow Terminal 5'), [{ q: 'Heathrow Terminal 5', match: 'exact' }]);
+const loc = agentTools.uberLocation(t5, 'Heathrow T5');
+check('Uber location fields (Uber docs names)', Object.keys(loc), ['latitude', 'longitude', 'addressLine1', 'addressLine2']);
+const link = new URL(agentTools.uberLink({ drop: loc, clientId: null }));
+check('Uber link base', `${link.origin}${link.pathname}`, 'https://m.uber.com/looking');
+check('Uber link: drop[0] is the JSON location', JSON.parse(link.searchParams.get('drop[0]')).latitude, 51.4723);
+check('Uber link: no pickup -> current location (param left out)', link.searchParams.has('pickup'), false);
+check('Uber link: client_id only when set', new URL(agentTools.uberLink({ drop: loc, clientId: 'abc' })).searchParams.get('client_id'), 'abc');
+check('routing block: transit Path A + B', [/request_transit/.test(agentTools.promptBlock(tester)), /queue_local_dispatch/.test(agentTools.promptBlock(tester))], [true, true]);
 check('parseGbp', [agentTools.parseGbp('£1,170.50'), agentTools.parseGbp('n/a')], [1170.5, null]);
 check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
 const evt = agentTools.mapEvent({ name: 'Art Club', url: 'https://www.eventbrite.co.uk/e/1', start_date: '2026-11-07', start_time: '10:00', primary_venue: { name: 'Paxton Centre', address: { city: 'London' } }, ticket_availability: { is_free: true } });

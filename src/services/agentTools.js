@@ -20,31 +20,56 @@
  *   source_retail_gift          UK gifts and flowers: price, shop link, delivery (Apify, Google Shopping)
  *   search_curated_experiences  tours and activities (Apify, GetYourGuide search)
  *   search_local_events         ticketed local events (Apify, Eventbrite)
+ *   request_transit             Path A: a pre-filled Uber link the client books with one tap
+ *
+ * Transit (agreed with the client 30 Oct): Path A = request_transit's Uber
+ * link (self-booking). Path B = the client wants us to book -> queue_local_dispatch
+ * hands the chat to the desk (human mode), who book in Uber Central or Wheely.
  */
 
 const users = require('./users');
 const tasks = require('./tasks');
 const apify = require('../integrations/apify');
+const geocode = require('../integrations/geocode');
 const email = require('../integrations/email');
-const { DESK_EMAIL } = require('./handoff');
+const handoff = require('./handoff');
 const { config } = require('../config');
 const { logger } = require('../lib/logger');
+
+const { DESK_EMAIL } = handoff;
 
 const QUEUE_LOCAL_DISPATCH_TOOL = {
   name: 'queue_local_dispatch',
   description:
-    'Ask the human desk to arrange a local taxi or car when no car service can be quoted for the trip '
-    + '(for example outside Uber coverage, or the client wants a local firm). Use it only after the client '
-    + 'has confirmed the pickup, drop-off and time. The desk books it and confirms; you do not.',
+    'The client wants the team to book a car for them (executive car, Uber booked by us, or a local taxi '
+    + 'firm). Use it only after the client has confirmed the pickup, drop-off and time. It hands the chat to '
+    + 'the concierge desk, who book it in Uber Central (or Wheely / a local firm) and confirm; you go quiet.',
   input_schema: {
     type: 'object',
     properties: {
       pickup: { type: 'string', description: 'Pickup address or place, as exact as the client gave it.' },
       dropoff: { type: 'string', description: 'Drop-off address or place.' },
       time: { type: 'string', description: "Pickup date and time in the client's local time, e.g. 'Fri 31 Oct 18:30'." },
-      reason: { type: 'string', description: 'Why a local car: e.g. no Uber coverage, luggage, client preference.' },
+      reason: { type: 'string', description: 'Optional: car type, luggage, flight number, or why a local firm.' },
     },
     required: ['pickup', 'dropoff', 'time'],
+  },
+};
+
+const REQUEST_TRANSIT_TOOL = {
+  name: 'request_transit',
+  description:
+    'Ground transport, Path A: make a pre-filled Uber link (pickup and drop-off set) that the client opens '
+    + 'and books with one tap in their own Uber app. Use it for any car or airport transfer. Uber links cannot '
+    + 'set a future time. If the client would rather the team book it, use queue_local_dispatch instead.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      dropoff: { type: 'string', description: "Full drop-off address or place with city, e.g. 'Heathrow Terminal 5, London'." },
+      pickup: { type: 'string', description: "Full pickup address with city. Leave out to use the client's current location." },
+      pickup_time: { type: 'string', description: "Optional: when they want to leave, client's local time, e.g. 'Fri 6 Nov 06:00'." },
+    },
+    required: ['dropoff'],
   },
 };
 
@@ -146,6 +171,7 @@ const SEARCH_EVENTS_TOOL = {
 const TOOLS = [
   QUEUE_LOCAL_DISPATCH_TOOL, SUBMIT_PRIVATE_INQUIRY_TOOL,
   CHECK_DINING_TOOL, SOURCE_GIFT_TOOL, SEARCH_EXPERIENCES_TOOL, SEARCH_EVENTS_TOOL,
+  REQUEST_TRANSIT_TOOL,
 ];
 const NAMES = new Set(TOOLS.map((t) => t.name));
 
@@ -171,8 +197,10 @@ function promptBlock(userId) {
 - Members' clubs, private dining rooms, or more than 6 guests: call submit_private_inquiry. Do NOT check live availability for these.
 - Gifts and flowers: call source_retail_gift first. Give the price, the shop and the delivery the shop shows (or say the team confirms the delivery date).
 - Tours, activities and travel itineraries: call search_curated_experiences. Local cultural events: call search_local_events.
-- A car the client has confirmed that no car service can quote (no coverage, or they want a local firm): call queue_local_dispatch.
+- Cars and airport transfers: call request_transit and send the Uber link (one tap, books in their own app). Uber links cannot set a future time: for a later pickup, tell them to tap "Schedule" in Uber, or offer that the team books it.
+- If the client wants the team to book the car: confirm pickup, drop-off and time, then call queue_local_dispatch.
 - Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
+- If an option is relevant but not exactly what was asked (roses instead of peonies, a different area, a later time), you may include it, but say plainly how it differs.
 - EVERY option you present ends with its booking_link on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
 - WhatsApp formatting: bold is *single asterisks*; never **double**, never markdown headings or [text](url) links.
 - When the client picks one, call handoff_to_concierge and copy that option's booking_link, vendor_phone and price from the tool result into it.
@@ -374,23 +402,92 @@ async function deskTask(user, { subject, summary, category = 'general', priority
   return task;
 }
 
+/** An Uber Location for the link: coordinates plus the names Uber shows. */
+const uberLocation = (place, asked) => ({
+  latitude: Number(place.lat.toFixed(6)),
+  longitude: Number(place.lon.toFixed(6)),
+  addressLine1: String(asked).slice(0, 60),
+  // OSM's full address runs to ten parts; three keep the link short and are enough to recognise.
+  addressLine2: String(place.address || asked).split(',').slice(0, 3).map((s) => s.trim()).join(', ').slice(0, 80),
+});
+
+/**
+ * Uber's universal link (developer.uber.com deep-links introduction, read 31 Oct):
+ * https://m.uber.com/looking?pickup=<Location JSON>&drop[0]=<Location JSON>. Opens
+ * the Uber app when installed, else the app store. No pickup -> Uber uses the
+ * client's current location. It cannot set a future pickup time.
+ * `drop` is a list (multi-stop): a plain `drop=` was ignored by Uber's web app,
+ * `drop[0]=` opened "Choose a ride: The Savoy -> Terminal 5" (checked 31 Oct).
+ */
+function uberLink({ pickup = null, drop, clientId = config.uber.clientId }) {
+  const params = new URLSearchParams();
+  if (clientId) params.set('client_id', clientId);
+  if (pickup) params.set('pickup', JSON.stringify(pickup));
+  params.set('drop[0]', JSON.stringify(drop));
+  return `https://m.uber.com/looking?${params}`;
+}
+
 const HANDLERS = {
+  // Path B: the team books the car, so the chat goes to the desk (human mode).
   async queue_local_dispatch(user, input, ctx, log) {
     const summary = [
-      'LOCAL DISPATCH: please book a local taxi or car and confirm to the client.',
+      'CAR BOOKING (client asked us to book): book in Uber Central (or Wheely / a local firm) and confirm to the client.',
       '',
       clientLine(user),
       `Pickup: ${input.pickup}`,
       `Drop-off: ${input.dropoff}`,
       `Time: ${input.time} (client's local time${user.active_timezone ? `, ${user.active_timezone}` : ''})`,
-      `Reason: ${input.reason || 'not given'}`,
+      `Notes: ${input.reason || 'none'}`,
     ].join('\n');
-    const task = await deskTask(user, { ...ctx, subject: 'LOCAL DISPATCH', summary }, log);
+    const task = await handoff.toHuman(user, {
+      summary,
+      category: 'general',
+      priority: 'high',
+      sourceMessage: ctx.sourceMessage,
+      requestId: ctx.requestId,
+      via: 'local_dispatch',
+    }, log);
     return {
       ok: true,
       task_id: task.task_id,
-      note: 'The desk is arranging the car. Tell the client in one line that a local car is being '
-        + 'arranged and the team will confirm the details shortly. Do not promise a price or a driver.',
+      note: 'The desk is booking the car and now has the chat. Tell the client in one line that the team is '
+        + 'arranging it and will confirm the details shortly. Do not promise a price, car or driver. You go quiet now.',
+    };
+  },
+
+  // Path A: a pre-filled Uber link the client books themselves.
+  async request_transit(user, input, ctx, log) {
+    const [drop, pick] = await Promise.all([
+      geocode.findPlace(input.dropoff, log),
+      input.pickup ? geocode.findPlace(input.pickup, log) : Promise.resolve(null),
+    ]);
+    const rough = [pick, drop].filter((p) => p && p.match !== 'exact');
+    if (!drop || (input.pickup && !pick)) {
+      return {
+        ok: false,
+        not_found: !drop ? input.dropoff : input.pickup,
+        note: 'That address could not be found on the map. Ask the client for the full address with postcode '
+          + 'or city and try again, or offer that the team books the car (queue_local_dispatch).',
+      };
+    }
+    const link = uberLink({
+      pickup: pick ? uberLocation(pick, input.pickup) : null,
+      drop: uberLocation(drop, input.dropoff),
+    });
+    return {
+      ok: true,
+      uber_link: link,
+      pickup: pick ? pick.address : "the client's current location",
+      dropoff: drop.address,
+      note: 'Send the uber_link on its own line: one tap opens Uber with the trip filled in, and they book it. '
+        + (rough.length
+          ? 'The map found the postcode or street, not the exact venue: ask them to check the pin in Uber before booking. '
+          : '')
+        + (input.pickup_time
+          ? 'Uber links cannot set a time: for a later pickup, tell them to tap "Schedule" in Uber. '
+          : '')
+        + 'Then offer that the team can book it for them instead (queue_local_dispatch). '
+        + 'Do not quote a price or arrival time: the link does not give one.',
     };
   },
 
@@ -593,5 +690,5 @@ module.exports = {
   TOOLS, enabledFor, definitionsFor, has, promptBlock, cannotVerify, run,
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
-  openTableLink, cleanShopUrl, resolveShopLink,
+  openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation,
 };
