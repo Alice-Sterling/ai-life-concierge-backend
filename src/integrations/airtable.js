@@ -155,6 +155,8 @@ async function updateUserRecord(recordId, fields, log = logger) {
 
 /** Postgres status -> the exact Airtable option ("On boarded" has a space there). */
 const AIRTABLE_STATUS = { Onboarded: 'On boarded' };
+// The Clients table's "Conversation Mode" option is spelled "human " (trailing space).
+const AIRTABLE_MODE = { ai: 'ai', human: 'human ' };
 
 /** Drop null and empty values so a partial update cannot blank a populated cell. */
 function sanitizeFields(fields) {
@@ -178,18 +180,19 @@ function sanitizeFields(fields) {
 async function syncUser(user, log = logger) {
   if (!isConfigured()) return null;
 
+  // Field names and types as they are in the client's Clients table (read
+  // 1 Nov). One wrong name or type makes Airtable reject the whole row: until
+  // then "Last Name", "Email", "Onboarding Completed At" (no such fields) and a
+  // date+time in the date-only "Next Date Due" meant no row update landed.
   const fields = sanitizeFields({
     'Client ID': user.client_id || user.short_id,
     [config.airtable.phoneField]: user.phone_number,
-    Email: user.email,
+    email: user.email,
     'First Name': user.first_name,
-    'Last Name': user.last_name,
+    Last_Name: user.last_name,
     Status: AIRTABLE_STATUS[user.onboarding_phase] || user.onboarding_phase,
-    'Conversation Mode': user.conversation_mode,
-    'Next Date Due': user.next_date_due_at ? new Date(user.next_date_due_at).toISOString() : null,
-    'Onboarding Completed At': user.onboarding_completed_at
-      ? new Date(user.onboarding_completed_at).toISOString()
-      : null,
+    'Conversation Mode': AIRTABLE_MODE[user.conversation_mode] || user.conversation_mode,
+    'Next Date Due': user.next_date_due_at ? new Date(user.next_date_due_at).toISOString().slice(0, 10) : null,
   });
 
   if (Object.keys(fields).length === 0) return null;

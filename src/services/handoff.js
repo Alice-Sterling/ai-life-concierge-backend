@@ -84,10 +84,12 @@ async function toHuman(user, {
   // to their own Airtable columns for the desk, and into the summary so
   // Postgres and the desk email keep them too.
   const desk = { bookingLink, vendorPhone, price };
+  // Only what the summary does not already say (1 Nov: the link appeared twice).
+  const has = (v) => String(summary || '').includes(String(v));
   const deskLines = [
-    bookingLink && `Booking link: ${bookingLink}`,
-    vendorPhone && `Vendor phone: ${vendorPhone}`,
-    price && `Price: ${price}`,
+    bookingLink && !has(bookingLink) && `Booking link: ${bookingLink}`,
+    vendorPhone && !has(vendorPhone) && `Vendor phone: ${vendorPhone}`,
+    price && !has(price) && `Price: ${price}`,
   ].filter(Boolean);
   if (deskLines.length) summary = `${summary || ''}\n\n${deskLines.join('\n')}`.trim();
 

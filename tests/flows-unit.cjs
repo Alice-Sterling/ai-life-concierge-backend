@@ -318,6 +318,15 @@ const nov1 = [
 ];
 check('flowers: no silk / toy-priced bouquets, other shops first', agentTools.pickGifts(nov1, 'peony bouquet').map((p) => `${p.store} ${p.price}`),
   ['Flowers by Flourish £30.00', 'Moyses Stevens Flowers £75.00', 'Flowers by Flourish £41.60', 'Flowers by Flourish £85.00']);
+const nov1Events = [
+  { name: 'Intensive Environmental Arts Therapy Weekend', date: '2026-11-01', time: '10:00' },
+  { name: 'Isoartee Free Art Workshops', date: '2026-11-05', time: '11:00' },
+  { name: 'Late View: Hockney Prints', date: '2026-11-04', time: '18:30' },
+  { name: 'Saturday Art Class with London Art Classes', date: '2026-11-07', time: '11:00' },
+];
+check('events: started ones out, classes/workshops after the rest',
+  agentTools.rankEvents(nov1Events, { now: new Date('2026-11-01T13:14:00Z'), tz: 'Europe/London' }).map((e) => e.name),
+  ['Late View: Hockney Prints', 'Isoartee Free Art Workshops', 'Saturday Art Class with London Art Classes']);
 check('asked for silk -> silk allowed', agentTools.pickGifts(nov1, 'silk peony bouquet').length, 5);
 check('not flowers -> no price floor', agentTools.pickGifts([{ title: 'Card', store: 'Papier', price: '£4.50' }], 'birthday card').length, 1);check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
 const evt = agentTools.mapEvent({ name: 'Art Club', url: 'https://www.eventbrite.co.uk/e/1', start_date: '2026-11-07', start_time: '10:00', primary_venue: { name: 'Paxton Centre', address: { city: 'London' } }, ticket_availability: { is_free: true } });

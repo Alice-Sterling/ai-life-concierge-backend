@@ -430,6 +430,31 @@ function mapEvent(e) {
   };
 }
 
+/** "YYYY-MM-DD HH:MM" now in a timezone, for comparing with Eventbrite's local start date and time. */
+function localStamp(now, tz) {
+  try {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz || 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now).map((x) => [x.type, x.value]));
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+  } catch {
+    return now.toISOString().slice(0, 16).replace('T', ' ');
+  }
+}
+
+/** Classes, workshops, therapy and children's events: kept, but after the rest. */
+const EVENT_LOW = /\b(class(es)?|course|workshops?|therapy|kids|children|toddlers?|family|beginners?)\b/i;
+
+/**
+ * Events not yet started (1 Nov: an event that began at 10:00 was offered at
+ * 13:14), with classes and workshops after the rest.
+ */
+function rankEvents(events, { now = new Date(), tz = 'Europe/London' } = {}) {
+  const stamp = localStamp(now, tz);
+  const upcoming = events.filter((e) => !e.date || `${e.date} ${e.time || '23:59'}` >= stamp);
+  return [...upcoming.filter((e) => !EVENT_LOW.test(e.name)), ...upcoming.filter((e) => EVENT_LOW.test(e.name))];
+}
+
 /** Eventbrite's location slug: 'united-kingdom--london'. */
 const slug = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const eventbriteCity = (city, country = 'United Kingdom') => `${slug(country)}--${slug(city)}`;
@@ -777,10 +802,11 @@ const HANDLERS = {
       startDate: input.start_date,
       endDate: input.end_date,
       maxPages: 1,
-      maxItems: 6,
+      maxItems: 10,
       proxyConfiguration: { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], apifyProxyCountry: 'GB' },
-    }, { userId: user.id, maxItems: 6 }, log);
-    const events = found.map(mapEvent).filter((e) => e.name && e.booking_link);
+    }, { userId: user.id, maxItems: 10 }, log);
+    const events = rankEvents(found.map(mapEvent).filter((e) => e.name && e.booking_link), { tz: user.active_timezone })
+      .slice(0, 6);
     if (!events.length) return JSON.parse(cannotVerify('No events found for that city and dates.'));
     return {
       ok: true,
@@ -831,5 +857,5 @@ module.exports = {
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
   openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation, addShortLinks, nationalRailLink,
-  giftQuery, pickGifts,
+  giftQuery, pickGifts, rankEvents,
 };
