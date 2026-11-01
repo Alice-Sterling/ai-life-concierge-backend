@@ -304,7 +304,22 @@ check('Uber link: no pickup -> current location (param left out)', link.searchPa
 check('Uber link: client_id only when set', new URL(agentTools.uberLink({ drop: loc, clientId: 'abc' })).searchParams.get('client_id'), 'abc');
 check('routing block: transit Path A + B', [/request_transit/.test(agentTools.promptBlock(tester)), /queue_local_dispatch/.test(agentTools.promptBlock(tester))], [true, true]);
 check('parseGbp', [agentTools.parseGbp('£1,170.50'), agentTools.parseGbp('n/a')], [1170.5, null]);
-check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
+check('flower search gets "fresh flower delivery"', agentTools.giftQuery('peony bouquet'), 'peony bouquet fresh flower delivery');
+check('non-flower and artificial searches left alone', [agentTools.giftQuery('Smythson notebook'), agentTools.giftQuery('silk peony bouquet')], ['Smythson notebook', 'silk peony bouquet']);
+// The 1 Nov result that went wrong: one real bouquet + the same silk bouquet from five shops.
+const nov1 = [
+  { title: 'Fresh Peonies Bouquet Pink Peonies', store: 'Flowers by Flourish', price: '£30.00' },
+  { title: 'Essential Pink Peony Bouquet', store: 'Country Baskets', price: '£2.99' },
+  { title: 'Essential Pink Peony Bouquet', store: 'Whittingtons Silk Flowers', price: '£4.15' },
+  { title: 'Essential Pink Peony Bouquet', store: 'The Range', price: '£7.99' },
+  { title: 'Moyses Stevens Peonies and Roses', store: 'Moyses Stevens Flowers', price: '£75.00' },
+  { title: 'Fresh Peony Bouquet', store: 'Flowers by Flourish', price: '£41.60' },
+  { title: 'Peony Next Day Delivery', store: 'Flowers by Flourish', price: '£85.00' },
+];
+check('flowers: no silk / toy-priced bouquets, other shops first', agentTools.pickGifts(nov1, 'peony bouquet').map((p) => `${p.store} ${p.price}`),
+  ['Flowers by Flourish £30.00', 'Moyses Stevens Flowers £75.00', 'Flowers by Flourish £41.60', 'Flowers by Flourish £85.00']);
+check('asked for silk -> silk allowed', agentTools.pickGifts(nov1, 'silk peony bouquet').length, 5);
+check('not flowers -> no price floor', agentTools.pickGifts([{ title: 'Card', store: 'Papier', price: '£4.50' }], 'birthday card').length, 1);check('tour price in pounds', agentTools.mapTour({ title: 'Sky Garden', price: 13.5, currency: 'GBP', url: 'https://gyg/x', provider: 'GetYourGuide' }).price, '£13.5');
 const evt = agentTools.mapEvent({ name: 'Art Club', url: 'https://www.eventbrite.co.uk/e/1', start_date: '2026-11-07', start_time: '10:00', primary_venue: { name: 'Paxton Centre', address: { city: 'London' } }, ticket_availability: { is_free: true } });
 check('event shape', [evt.venue, evt.price, evt.time], ['Paxton Centre, London', 'Free', '10:00']);
 check('Eventbrite city slug', [agentTools.eventbriteCity('London'), agentTools.eventbriteCity('New York', 'United States')], ['united-kingdom--london', 'united-states--new-york']);

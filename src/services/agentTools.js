@@ -327,6 +327,50 @@ function mapProduct(p) {
   };
 }
 
+const FLORAL = /\b(flowers?|bouquets?|peon(y|ies)|roses?|lil(y|ies)|orchids?|tulips?|hydrangeas?|florist|blooms?)\b/i;
+const ARTIFICIAL = /\b(artificial|silk|faux|fake|dried|plastic)\b|florist supplies/i;
+
+/**
+ * The shopping search for a gift. Flowers get "fresh flower delivery" added:
+ * a bare "peony bouquet" returned mostly silk bouquets (1 Nov), the longer
+ * search only real florists (Moyses Stevens, Flowers by Flourish...).
+ */
+function giftQuery(search) {
+  const q = String(search || '').trim();
+  return FLORAL.test(q) && !ARTIFICIAL.test(q) && !/\bfresh\b/i.test(q) ? `${q} fresh flower delivery` : q;
+}
+
+/**
+ * Clean product options: no artificial flowers unless asked, no flowers at
+ * toy prices (under £15), one row per product, and other shops before a
+ * second product from the same shop.
+ */
+function pickGifts(products, search) {
+  const floral = FLORAL.test(String(search || ''));
+  const wantArtificial = ARTIFICIAL.test(String(search || ''));
+  const seen = new Set();
+  const clean = products.filter((p) => {
+    if (!p.title || !p.price) return false;
+    if (floral && !wantArtificial && (ARTIFICIAL.test(`${p.title} ${p.store || ''}`) || (parseGbp(p.price) ?? 0) < 15)) return false;
+    const key = String(p.title).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const shops = new Set();
+  const first = [];
+  const rest = [];
+  for (const p of clean) {
+    if (shops.has(p.store)) {
+      rest.push(p);
+    } else {
+      shops.add(p.store);
+      first.push(p);
+    }
+  }
+  return [...first, ...rest];
+}
+
 /** Drop tracking parameters Google adds to shop links. */
 function cleanShopUrl(url) {
   try {
@@ -391,8 +435,8 @@ const slug = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, 
 const eventbriteCity = (city, country = 'United Kingdom') => `${slug(country)}--${slug(city)}`;
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
-const PICK_NOTE = 'Present 2 to 3 contrasting options. When the client picks one, call handoff_to_concierge '
-  + "with that option's booking_link, vendor_phone and price.";
+const PICK_NOTE = 'Present 2 to 3 contrasting options, and never announce a number of options you do not then show. '
+  + "When the client picks one, call handoff_to_concierge with that option's booking_link, vendor_phone and price.";
 
 /** The answer a tool gives when it could not check: Alice must not guess. */
 function cannotVerify(reason) {
@@ -677,19 +721,19 @@ const HANDLERS = {
   async source_retail_gift(user, input, ctx, log) {
     if (!apify.isConfigured()) return JSON.parse(cannotVerify('Live product search is not set up yet.'));
     const found = await apify.run('googleShopping', {
-      queries: [input.search],
+      queries: [giftQuery(input.search)],
       countryCode: 'gb',
-      maxItems: 5,
+      maxItems: 6,
       includeSponsoredResults: false,
-      // Opens each product's offer: the shop's own link, delivery date and fee.
-      includeComparisonPrices: true,
+      // Opens each product: the shop's own link, delivery date and fee. Price
+      // comparison stays off: it lists every seller of ONE product as rows
+      // (1 Nov: five shops selling the same silk bouquet filled the results).
+      includeComparisonPrices: false,
       includeExtraProductDetails: true,
-    }, { userId: user.id, maxItems: 5 }, log);
+    }, { userId: user.id, maxItems: 6, timeoutSecs: 90 }, log);
 
     const max = Number(input.budget_max_gbp);
-    const products = found
-      .map(mapProduct)
-      .filter((p) => p.title && p.price)
+    const products = pickGifts(found.map(mapProduct), input.search)
       .filter((p) => !(max > 0) || (parseGbp(p.price) ?? Infinity) <= max)
       .slice(0, 4);
     if (!products.length) return JSON.parse(cannotVerify('No listed products matched that search and budget.'));
@@ -787,4 +831,5 @@ module.exports = {
   // result shaping, exported for tests
   slotsNear, mapOpenTable, mapGooglePlace, mapProduct, mapTour, mapEvent, eventbriteCity, parseGbp, gygSearchUrl,
   openTableLink, cleanShopUrl, resolveShopLink, uberLink, uberLocation, addShortLinks, nationalRailLink,
+  giftQuery, pickGifts,
 };
