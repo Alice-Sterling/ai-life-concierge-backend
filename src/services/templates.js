@@ -75,10 +75,35 @@ const TEMPLATES = {
   pending_stripe: {
     name: 'ailc_pending_stripe_v1',
     variables: (u) => ({ 1: firstName(u), 2: clientKey(u) }),
-    text: (u) =>
-      `Hello ${firstName(u)}, Alice here. Your lifestyle preferences are now set up. There's just `
-      + 'one final step to activate your Founding Membership and complimentary six-month trial.'
-      + (config.gate.paymentUrl ? `\n${withPaymentRef(config.gate.paymentUrl, u)}` : ''),
+    // Without PAYMENT_URL the text must not promise a step it cannot show (Sarah, 1 Nov:
+    // "one final step" with nothing to tap -> "What is it?").
+    text: (u) => (config.gate.paymentUrl
+      ? `Hello ${firstName(u)}, Alice here. Your lifestyle preferences are now set up. There's just `
+        + 'one final step to activate your Founding Membership and complimentary six-month trial:'
+        + `\n${withPaymentRef(config.gate.paymentUrl, u)}`
+      : `Hello ${firstName(u)}, Alice here. Your lifestyle preferences are now set up. The final step is `
+        + 'activating your Founding Membership and complimentary six-month trial: our team will send you '
+        + 'your secure link here shortly.'),
+  },
+  // Plain text, inside the window: a status client who writes again within the
+  // repeat window gets this instead of silence (Sarah's "What is it?" went unanswered).
+  gate_followup: {
+    name: null,
+    variables: () => ({}),
+    text: (u, d = {}) => {
+      if (d.status === 'Onboarded') {
+        return config.gate.paymentUrl
+          ? `Here is your secure link to activate your Founding Membership: ${withPaymentRef(config.gate.paymentUrl, u)}`
+            + '\nOnce that is done, I can take care of requests like this one.'
+          : 'Our team will send your secure activation link here shortly. Once that is done, I can take care '
+            + 'of requests like this one.';
+      }
+      if (d.status === 'Approved') {
+        return 'Your onboarding link is in my message above. Once it is complete, I will be ready for you.';
+      }
+      return "Thank you. You're on our Founding Member list, and we'll contact you here as soon as your "
+        + 'invitation is ready.';
+    },
   },
   membership_inactive: {
     name: 'ailc_membership_inactive_v1',

@@ -30,6 +30,7 @@ const tasks = require('./tasks');
 const events = require('./events');
 const conversations = require('./conversations');
 const templates = require('./templates');
+const { config } = require('../config');
 const { logger } = require('../lib/logger');
 
 const DESK_EMAIL = 'assist@ailifeconcierge.co.uk';
@@ -248,14 +249,48 @@ async function admit(user, { phoneNumber, incomingText = '', requestId = null } 
   const key = STATUS_TEMPLATE[status] || 'status_waitlist';
 
   if (await templates.sentRecently(user.id, key, log)) {
-    await conversations.save(user.id, incomingText, null, { gate: key, suppressed: true }, log);
-    log.info('gate.template_suppressed', { template: key });
-    return { halt: true, reply: null };
+    // Written again within the repeat window: one short follow-up instead of
+    // silence (once per window), and the desk hears about a near-client's ask.
+    const followUp = FOLLOW_UP_STATUSES.has(status)
+      && !(await templates.sentRecently(user.id, 'gate_followup', log));
+    if (status === 'Onboarded') await tellDesk(user, incomingText, requestId, log);
+    if (!followUp) {
+      await conversations.save(user.id, incomingText, null, { gate: key, suppressed: true }, log);
+      log.info('gate.template_suppressed', { template: key });
+      return { halt: true, reply: null };
+    }
+    const sent = await templates.send('gate_followup', { to, user, requestId, data: { status } }, log);
+    await conversations.save(user.id, incomingText, sent.text, { gate: 'gate_followup' }, log);
+    log.info('gate.followup_sent', { template: key });
+    return { halt: true, reply: { text: sent.text, via: sent.via } };
   }
 
   const sent = await templates.send(key, { to, user, requestId }, log);
   await conversations.save(user.id, incomingText, sent.text, { gate: key }, log);
+  // Onboarded = form done, payment not yet: the desk hears what they asked for,
+  // and has to send the link by hand while PAYMENT_URL is not set.
+  if (status === 'Onboarded') await tellDesk(user, incomingText, requestId, log);
   return { halt: true, reply: { text: sent.text, via: sent.via } };
+}
+
+/** Statuses that get one short follow-up instead of silence when they write again. */
+const FOLLOW_UP_STATUSES = new Set(['Onboarded', 'Approved', 'Waitlist']);
+
+/** Email the desk about an Onboarded client's message (they are one payment away). */
+async function tellDesk(user, incomingText, requestId, log) {
+  if (!email.isConfigured()) return;
+  const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.phone_number;
+  const noLink = !config.gate.paymentUrl;
+  await email.send({
+    to: DESK_EMAIL,
+    subject: `ONBOARDED CLIENT WROTE: ${name}${noLink ? ' (send payment link)' : ''}`,
+    text: `${name} has finished onboarding but not paid yet, so Alice did not answer.\n\n`
+      + `Message: ${incomingText}\nPhone: ${user.phone_number || ''}\nClient ID: ${user.short_id || user.client_id || ''}\n\n`
+      + (noLink
+        ? 'PAYMENT_URL is not set, so they have no payment link: please send it to them on WhatsApp.\n'
+        : 'They were sent the payment link.\n')
+      + `Request ID: ${requestId || ''}`,
+  }, log);
 }
 
 module.exports = { STATUS_TEMPLATE, GREETING, adoptFromAirtable, rejectUnknown, admit };

@@ -69,6 +69,19 @@ check('date night keeps {{16}}/{{17}}', Object.keys(templates.TEMPLATES.datenigh
 check('weekly SID default (approved one)', config.templates.weekly_briefing, 'HX99dd6899b50bf20afd3ea632e69db152');
 check('milestone SID default (approved one)', config.templates.milestone_ping, 'HXd081fba8e431f93bf9229b86919cf32d');
 
+console.log('\nFRONT DOOR: ONBOARDED CLIENTS (Sarah, 1 Nov)');
+const sarah = { first_name: 'Sarah', short_id: 'Ai-GQ6Ips4jB' };
+const savedPay = config.gate.paymentUrl;
+config.gate.paymentUrl = null;
+check('no PAYMENT_URL: no "one final step" with nothing to tap', /final step is activating.*team will send you your secure link/.test(templates.TEMPLATES.pending_stripe.text(sarah)), true);
+check('no PAYMENT_URL: follow-up says the team sends the link', /team will send your secure activation link/.test(templates.TEMPLATES.gate_followup.text(sarah, { status: 'Onboarded' })), true);
+config.gate.paymentUrl = 'https://pay.ailifeconcierge.co.uk/b/cNi6oHbxs6KVe3e5a0dfG00';
+check('with PAYMENT_URL: the link carries her client id', templates.TEMPLATES.pending_stripe.text(sarah).endsWith('cNi6oHbxs6KVe3e5a0dfG00?client_reference_id=Ai-GQ6Ips4jB'), true);
+check('with PAYMENT_URL: follow-up repeats the link', /client_reference_id=Ai-GQ6Ips4jB/.test(templates.TEMPLATES.gate_followup.text(sarah, { status: 'Onboarded' })), true);
+config.gate.paymentUrl = savedPay;
+check('follow-up for Waitlist', /Founding Member list/.test(templates.TEMPLATES.gate_followup.text(sarah, { status: 'Waitlist' })), true);
+check('follow-up is plain text (no template SID)', [templates.TEMPLATES.gate_followup.name, config.templates.gate_followup], [null, undefined]);
+
 console.log('\nSWITCHES OFF BY DEFAULT');
 check('weekly briefing off', config.lifecycle.weeklyBriefing, false);
 check('milestone ping off', config.lifecycle.milestonePing, false);
