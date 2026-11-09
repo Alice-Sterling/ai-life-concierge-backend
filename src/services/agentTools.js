@@ -51,7 +51,7 @@ const QUEUE_LOCAL_DISPATCH_TOOL = {
     properties: {
       pickup: { type: 'string', description: 'Pickup address or place, as exact as the client gave it.' },
       dropoff: { type: 'string', description: 'Drop-off address or place.' },
-      time: { type: 'string', description: "Pickup date and time in the client's local time, e.g. 'Fri 31 Oct 18:30'." },
+      time: { type: 'string', description: "Pickup date and time in LIVE USER CONTEXT User Timezone. Use unambiguous text, e.g. '2026-10-31 18:30 Europe/London'." },
       reason: { type: 'string', description: 'Optional: car type, luggage, flight number, or why a local firm.' },
     },
     required: ['pickup', 'dropoff', 'time'],
@@ -69,7 +69,7 @@ const REQUEST_TRANSIT_TOOL = {
     properties: {
       dropoff: { type: 'string', description: "Full drop-off address or place with city, e.g. 'Heathrow Terminal 5, London'." },
       pickup: { type: 'string', description: "Full pickup address with city. Leave out to use the client's current location." },
-      pickup_time: { type: 'string', description: "Optional: when they want to leave, client's local time, e.g. 'Fri 6 Nov 06:00'." },
+      pickup_time: { type: 'string', description: "Optional: when they want to leave in LIVE USER CONTEXT User Timezone, e.g. '2026-11-06 06:00 Europe/London'. Uber links still cannot schedule a future ride." },
     },
     required: ['dropoff'],
   },
@@ -86,7 +86,7 @@ const SUBMIT_PRIVATE_INQUIRY_TOOL = {
     type: 'object',
     properties: {
       venue: { type: 'string', description: 'Venue name, and area if known.' },
-      date: { type: 'string', description: "Date and preferred time, in the client's local time." },
+      date: { type: 'string', description: "Date and preferred time in LIVE USER CONTEXT User Timezone, e.g. '2026-11-06 19:30 Europe/London'." },
       guest_count: { type: 'integer', description: 'Number of guests, including the client.' },
       occasion: { type: 'string', description: 'Optional: client dinner, birthday, anniversary...' },
       requirements: { type: 'string', description: 'Optional: private room, dietary needs, budget, wine.' },
@@ -162,9 +162,9 @@ const SEARCH_EVENTS_TOOL = {
     properties: {
       city: { type: 'string', description: "City, e.g. 'London'." },
       country: { type: 'string', description: "Country, default 'United Kingdom'." },
-      category: { type: 'string', enum: EVENT_CATEGORIES },
-      start_date: { type: 'string', description: 'YYYY-MM-DD' },
-      end_date: { type: 'string', description: 'YYYY-MM-DD' },
+      category: { type: 'string', enum: EVENT_CATEGORIES, description: `One of: ${EVENT_CATEGORIES.join(', ')}.` },
+      start_date: { type: 'string', description: 'YYYY-MM-DD in LIVE USER CONTEXT User Timezone.' },
+      end_date: { type: 'string', description: 'YYYY-MM-DD in LIVE USER CONTEXT User Timezone.' },
     },
     required: ['city', 'category', 'start_date', 'end_date'],
   },
@@ -176,14 +176,14 @@ const SEARCH_RAIL_TOOL = {
     'UK train journeys, Path A: make a National Rail journey-planner link with the stations, date and time '
     + 'filled in. The page shows the live trains and fares and the client buys there. Use it for any UK rail '
     + 'trip, including trains to an airport (e.g. London Paddington to Heathrow Terminal 5). If the client '
-    + 'would rather the team book the tickets, call handoff_to_concierge with the journey instead.',
+    + 'would rather the team book the tickets, use handoff_to_concierge with a complete journey summary.',
   input_schema: {
     type: 'object',
     properties: {
       from: { type: 'string', description: "Departure station, e.g. 'London Paddington' (or its 3-letter code)." },
       to: { type: 'string', description: "Arrival station, e.g. 'Heathrow Terminal 5', 'Edinburgh Waverley'." },
-      date: { type: 'string', description: 'YYYY-MM-DD' },
-      time: { type: 'string', description: 'HH:MM, 24-hour.' },
+      date: { type: 'string', description: 'YYYY-MM-DD in LIVE USER CONTEXT User Timezone.' },
+      time: { type: 'string', description: 'HH:MM, 24-hour, in LIVE USER CONTEXT User Timezone.' },
       arrive_by: { type: 'boolean', description: 'true if the time is when they must arrive, not leave.' },
       adults: { type: 'integer', description: 'Number of adults, default 1.' },
     },
@@ -222,7 +222,8 @@ function promptBlock(userId) {
 - Tours, activities and travel itineraries: call search_curated_experiences. Local cultural events: call search_local_events.
 - Cars and airport transfers: call request_transit and send the Uber link (one tap, books in their own app). Uber links cannot set a future time: for a later pickup, tell them to tap "Schedule" in Uber, or offer that the team books it.
 - If the client wants the team to book the car: confirm pickup, drop-off and time, then call queue_local_dispatch.
-- UK trains (including to an airport): call search_rail_routes and send the National Rail link (live trains and fares, they buy there). If they want the team to book the tickets, call handoff_to_concierge with the journey.
+- UK trains (including to an airport): call search_rail_routes and send the National Rail link (live trains and fares, they buy there). If they want the team to book the tickets, call handoff_to_concierge with a complete journey summary.
+- For every date/time argument, resolve relative phrases against Current UTC Time and User Timezone in LIVE USER CONTEXT before calling the tool.
 - Present 2 to 3 contrasting options, never a long list. Never invent a venue, time, price or link that a tool did not return.
 - If an option is relevant but not exactly what was asked (roses instead of peonies, a different area, a later time), you may include it, but say plainly how it differs.
 - EVERY option you present ends with its short "link" on its own line, as a plain URL, so the client can book or buy it themselves in one tap. Then offer that the team can arrange it for them instead.
