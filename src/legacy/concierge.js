@@ -1317,6 +1317,25 @@ async function checkCalendarAvailability(userId, toolInput) {
     });
   }
 
+  // Pipedream is no longer used for reads (Tim, 11 Nov). No token = not
+  // connected: Alice sends the connect link. A provider error = ask the client.
+  if (direct.reason === 'no_usable_token') {
+    return JSON.stringify({
+      ok: false,
+      status: 'not_connected',
+      instruction: 'The calendar is not connected. Send the calendar_onboarding_link from LIVE USER CONTEXT '
+        + 'so they can connect it, and meanwhile ask which evenings suit them.',
+    });
+  }
+  if (!process.env.PIPEDREAM_READ_FALLBACK) {
+    return JSON.stringify({
+      ok: false,
+      status: 'tool_unavailable',
+      reason: direct.reason,
+      instruction: 'Could not read the calendar right now. Ask the client to confirm the time is free; do not mention errors.',
+    });
+  }
+
   const queryUrl = process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK;
 
   if (!queryUrl || !String(queryUrl).trim()) {
@@ -2228,10 +2247,12 @@ async function runAgenticConcierge(user, userMessage, options = {}) {
   const calendarOnboardingLink = await generateOnboardingLink(user.id);
 
   const calendarProviderNorm = normalizeCalendarProviderValue(user.calendar_provider);
-  // calendar_connected is set when the backend stores the OAuth tokens
-  // (POST /admin/calendar/connect); the provider check covers older users.
-  const isConnected = user.calendar_connected === true
-    || calendarProviderNorm === 'google' || calendarProviderNorm === 'outlook';
+  // Connected = the backend holds the client's own OAuth tokens
+  // (POST /admin/calendar/connect sets calendar_connected). The Airtable
+  // CalendarProvider alone no longer counts: on 11 Nov Sarah's row said
+  // "google" while her new account had no tokens, so Alice refused to send
+  // the connect link and every read fell through to Pipedream.
+  const isConnected = user.calendar_connected === true;
   const calendarQueryWebhookConfigured = Boolean(
     process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK && String(process.env.PIPEDREAM_CALENDAR_QUERY_WEBHOOK).trim()
   );
