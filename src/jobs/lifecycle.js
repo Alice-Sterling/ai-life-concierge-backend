@@ -11,11 +11,14 @@ const cron = require('node-cron');
 const { config } = require('../config');
 const lifecycle = require('../services/lifecycle');
 const proactiveFlows = require('../services/proactiveFlows');
+const airtableSync = require('../services/airtableSync');
 const { logger } = require('../lib/logger');
 
 /** One pass. Exported so tests and the admin can run it on demand. */
 async function runOnce(log = logger) {
   const parts = [
+    // First, so every part below works from what the desk last set in Airtable.
+    ['airtable_sync', config.airtable.pullEnabled, airtableSync.syncAll],
     ['onboarding_reminders', config.lifecycle.onboardingReminder, lifecycle.runOnboardingReminders],
     ['handshake_pings', config.lifecycle.handshakePing, lifecycle.runHandshakePings],
     ['proposal_nudges', config.lifecycle.proposalNudge, lifecycle.runProposalNudges],

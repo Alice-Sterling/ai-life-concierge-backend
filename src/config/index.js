@@ -91,6 +91,8 @@ const config = {
     phoneField: str('AIRTABLE_PHONE_FIELD', 'phone_number'),
     // Field on the Tasks table that links back to the user's profile record.
     tasksUserLinkField: str('AIRTABLE_TASKS_USER_LINK_FIELD', 'Requesting Client'),
+    // Airtable -> backend every 15 minutes (src/services/airtableSync.js). On by default.
+    pullEnabled: bool('AIRTABLE_PULL_ENABLED', true),
   },
 
   email: {

@@ -30,6 +30,7 @@ const tasks = require('./tasks');
 const events = require('./events');
 const conversations = require('./conversations');
 const templates = require('./templates');
+const airtableSync = require('./airtableSync');
 const { config } = require('../config');
 const { logger } = require('../lib/logger');
 
@@ -95,8 +96,9 @@ async function adoptFromAirtable(phoneNumber, profileName, log = logger) {
     `INSERT INTO users (phone_number, first_name, last_name, email, tier, client_id, onboarding_phase)
      VALUES ($1, $2, $3, $4, 'lite', $5, $6)
      RETURNING *`,
-    [phoneNumber, pick(f['First Name']) || profileName || 'Explorer', pick(f['Last Name']),
-      pick(f.Email), clientId, phase],
+    // Clients table names: "Last_Name", "email" (read 11 Nov; "Last Name"/"Email" do not exist).
+    [phoneNumber, pick(f['First Name']) || profileName || 'Explorer', pick(f.Last_Name ?? f['Last Name']),
+      pick(f.email ?? f.Email), clientId, phase],
     log);
 
   let rows;
@@ -165,6 +167,25 @@ async function linkAirtableClientId(user, record, log) {
   }
 }
 
+/**
+ * The rest of the client's Airtable row (profile, automations, mode, date
+ * night) into Postgres before Alice answers, so a desk edit counts at once.
+ * The in-memory user is refreshed when something changed. Never blocks the
+ * message: a failure is logged and the old values are used.
+ */
+async function pullFromAirtable(user, record, log) {
+  if (!record) return;
+  try {
+    const changed = await airtableSync.applyRecord(user, record, log);
+    if (changed.length) {
+      const { rows } = await db.query('SELECT * FROM users WHERE id = $1::uuid', [user.id], log);
+      if (rows[0]) Object.assign(user, rows[0]);
+    }
+  } catch (err) {
+    log.warn('gate.airtable_pull_failed', { message: err.message });
+  }
+}
+
 /** Copy a status changed in Airtable into Postgres. Returns the effective status. */
 async function syncStatus(user, phoneNumber, requestId, log) {
   const record = await lookupAirtable({
@@ -172,6 +193,7 @@ async function syncStatus(user, phoneNumber, requestId, log) {
     phone: cleanPhone(phoneNumber || user.phone_number),
   }, log);
   await linkAirtableClientId(user, record, log);
+  await pullFromAirtable(user, record, log);
   const fromAirtable = users.normalizePhase(record?.fields?.Status);
 
   if (fromAirtable && fromAirtable !== user.onboarding_phase) {

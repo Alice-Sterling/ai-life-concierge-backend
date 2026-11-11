@@ -281,7 +281,26 @@ async function healthCheck() {
   };
 }
 
+/**
+ * Every record of the Clients table (paged, 100 at a time, capped at 2,000).
+ * Used by the 15-minute Airtable -> backend sync (src/services/airtableSync.js).
+ * @returns {Promise<object[]|null>} null when Airtable could not be read
+ */
+async function listUserRecords(log = logger) {
+  if (!isConfigured()) return null;
+  const out = [];
+  let offset = null;
+  do {
+    const qs = new URLSearchParams({ pageSize: '100', ...(offset ? { offset } : {}) });
+    const res = await request('GET', `${tableUrl(config.airtable.userTableRef)}?${qs}`, { log });
+    if (!res.ok) return null;
+    out.push(...(res.data?.records || []));
+    offset = res.data?.offset || null;
+  } while (offset && out.length < 2000);
+  return out;
+}
+
 module.exports = {
   isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord, updateUserRecord,
-  phoneDigitVariants, phoneMatchFormula, healthCheck,
+  listUserRecords, phoneDigitVariants, phoneMatchFormula, healthCheck,
 };

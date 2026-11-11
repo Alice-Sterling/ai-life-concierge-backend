@@ -82,6 +82,26 @@ config.gate.paymentUrl = savedPay;
 check('follow-up for Waitlist', /Founding Member list/.test(templates.TEMPLATES.gate_followup.text(sarah, { status: 'Waitlist' })), true);
 check('follow-up is plain text (no template SID)', [templates.TEMPLATES.gate_followup.name, config.templates.gate_followup], [null, undefined]);
 
+console.log('\nAIRTABLE -> BACKEND (11 Nov)');
+const atSync = require('../src/services/airtableSync');
+check('website automation labels -> backend slugs (Jonny\'s real row)', atSync.automationSlugs(
+  'Regular Date Night Automation (monthly), Ad-hoc Client Event Automation, Proactive Milestone Proposals, '
+  + 'Automated Flowers & Card Delivery (personal), Seamless Door-to-Door Coordination, Proactive Destination Experience Proposals'),
+['date_night', 'gifting', 'travel_logistics']);
+check('cadence from the label: monthly -> 30, none -> null',
+  [atSync.cadenceFromLabels('Regular Date Night Automation (monthly), Proactive Milestone Proposals'), atSync.cadenceFromLabels('Proactive Milestone Proposals')], [30, null]);
+const timRow = { 'First Name': 'Timotej Antos', Last_Name: 'Antoš', 'Conversation Mode': 'human ', 'Date Night Cadence': 0, 'Next Date Due': '2026-11-08', 'Home City': 'London', ActiveAutomations: 'Seamless Door-to-Door Coordination' };
+const read = atSync.readFields(timRow);
+check('Airtable row read: "human " -> human, cadence 0 = empty, profile fields', [read.conversation_mode, read.date_night_cadence, read.home_city, read.next_date_due, read.partner_name], ['human', null, 'London', '2026-11-08', null]);
+const first = atSync.diff(read, {});
+check('first look: every filled field applies', Object.keys(first.changes).sort(), ['automations', 'conversation_mode', 'first_name', 'home_city', 'last_name', 'next_date_due']);
+const again = atSync.diff(read, first.seen);
+check('same Airtable values again: nothing applies (a failed push is not undone)', Object.keys(again.changes), []);
+const edited = atSync.diff({ ...read, home_city: 'Manchester', conversation_mode: 'ai' }, first.seen);
+check('desk edits Home City + Conversation Mode: exactly those apply', edited.changes, { conversation_mode: 'ai', home_city: 'Manchester' });
+check('an emptied Airtable cell does not wipe the backend', Object.keys(atSync.diff({ ...read, home_city: null }, first.seen).changes), []);
+check('Airtable pull on by default', config.airtable.pullEnabled, true);
+
 console.log('\nSWITCHES OFF BY DEFAULT');
 check('weekly briefing off', config.lifecycle.weeklyBriefing, false);
 check('milestone ping off', config.lifecycle.milestonePing, false);
