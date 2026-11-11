@@ -801,7 +801,7 @@ If LIVE USER CONTEXT shows Calendar Connected: True, the user's calendar OAuth i
 - If the tool returns free/busy data, only propose slots in free gaps.
 - If check_calendar_availability returns tool_unavailable, request_failed, or http_error: do NOT escalate to the human desk. Do NOT claim a "backend sync error" or permission problem. Continue with vault curation and ask the user to confirm the evening is free. You may retry the tool once.
 - If Calendar Connected is False, send the calendar_onboarding_link — never claim you can read their calendar.
-- Use execute_pipedream_calendar_task only for create_event after the user confirms a slot.
+- You cannot add events to their calendar. When a booking is confirmed, say the team will send a calendar invite with the confirmation.
 
 3. THE SECURE HANDSHAKE (SYNC PROTOCOL)
 When a user provides the activation phrase: "I've now connected my calendar and enabled my automations - please sync systems to activate."
@@ -980,7 +980,7 @@ const SAVE_DATE_NIGHT_PREFERENCES_ANTHROPIC_TOOL = {
 const EXECUTE_ACTION_ANTHROPIC_TOOL = {
   name: 'execute_action',
   description:
-    'Composio integration actions for this user: email, CRM, and non-calendar automation. NOT for Google Calendar, Outlook calendar, events, meetings, free/busy, or scheduling — the backend rejects calendar-like tool slugs; use execute_pipedream_calendar_task for those. Requires tool_slug, arguments, and connected_account_id when needed. Not for OAuth.',
+    'Composio integration actions for this user: email, CRM, and non-calendar automation. NOT for Google Calendar, Outlook calendar, events, meetings, free/busy, or scheduling — the backend rejects calendar-like tool slugs; use check_calendar_availability to read a calendar. Requires tool_slug, arguments, and connected_account_id when needed. Not for OAuth.',
   input_schema: {
     type: 'object',
     properties: {
@@ -1238,7 +1238,11 @@ const EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL = {
   },
 };
 
+// Pipedream is no longer used (Tim, 11 Nov): the calendar tool is not offered
+// to Alice. Calendar events come from the team with the booking (invite).
+// PIPEDREAM_CALENDAR_ENABLED=true brings it back if ever needed.
 function getPipedreamCalendarAnthropicTools() {
+  if (process.env.PIPEDREAM_CALENDAR_ENABLED !== 'true') return [];
   const url = process.env.PIPEDREAM_CALENDAR_URL || process.env.EXECUTE_PIPEDREAM_CALENDAR_TASK_URL;
   if (!url || !String(url).trim()) return [];
   return [EXECUTE_PIPEDREAM_CALENDAR_TASK_ANTHROPIC_TOOL];
@@ -1718,7 +1722,7 @@ async function executeComposioAction(toolInput, composioUserId) {
   if (/\bCALENDAR\b|GCAL|OUTLOOK_?CAL|MICROSOFT_?CAL|FREE_?BUSY|BUSY_?READ|MEETING_?TIME|_EVENTS?\b|CREATE_?EVENT|LIST_?EVENT/i.test(slugStr)) {
     return JSON.stringify({
       error:
-        'Calendar and scheduling use execute_pipedream_calendar_task (not Composio). This tool is blocked for calendar-related slugs.',
+        'Calendar reads use check_calendar_availability; events are added by the team with the booking. This tool is blocked for calendar-related slugs.',
     });
   }
   try {
@@ -2024,7 +2028,9 @@ async function getHybridResponseFromMessages(
           } else if (tu.name === 'check_calendar_availability') {
             payload = await checkCalendarAvailability(composioUserId, tu.input);
           } else if (tu.name === 'execute_pipedream_calendar_task') {
-            payload = await executePipedreamCalendarTask(tu.input);
+            payload = process.env.PIPEDREAM_CALENDAR_ENABLED === 'true'
+              ? await executePipedreamCalendarTask(tu.input)
+              : JSON.stringify({ ok: false, error: 'Not available. Say the team will send a calendar invite with the booking.' });
           } else if (tu.name === 'execute_action') {
             payload = await executeComposioAction(tu.input, composioUserId);
           } else if (tu.name === 'save_onboarding_profile') {
