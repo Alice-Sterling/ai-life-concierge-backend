@@ -33,7 +33,20 @@ const isEmpty = (v) => v == null
   || (typeof v === 'string' && v.trim() === '')
   || (Array.isArray(v) && v.filter((x) => !isEmpty(x)).length === 0);
 
-const asText = (v) => (Array.isArray(v) ? v.filter((x) => !isEmpty(x)).join(', ') : String(v).trim());
+const sanitize = (v, max = 180) => {
+  const text = String(v ?? '')
+    .replace(/\r/g, '\n')
+    .replace(/(^|\n)\s*(#{1,6}\s*|\[(?:SYSTEM|TOOL|CONTEXT|AI_SUMMARY|TRIGGER)[^\]]*\]\s*)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > max ? `${text.slice(0, max)}…[truncated]` : text;
+};
+
+const asText = (v) => (
+  Array.isArray(v)
+    ? v.filter((x) => !isEmpty(x)).map((x) => sanitize(x, 80)).join(', ')
+    : sanitize(v)
+);
 
 const titleCase = (slug) => String(slug)
   .replace(/[_-]+/g, ' ')
@@ -87,8 +100,8 @@ async function tasksBlock(userId, log = logger) {
     if (!rows.length) return '';
 
     const lines = rows.map((t) => {
-      const when = new Date(t.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-      const summary = String(t.ai_summary || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      const when = new Date(t.created_at).toISOString();
+      const summary = sanitize(t.ai_summary || '', 220);
       return `- [${t.status}] ${t.category || 'general'}, ${when}: ${summary || 'no summary'}`;
     });
     return `\n### ACTIVE TASKS (the concierge team is handling these)\n${lines.join('\n')}\n`
