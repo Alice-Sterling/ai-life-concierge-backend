@@ -140,7 +140,10 @@ when one was renamed or deleted. Cached for five minutes (`?fresh=1` checks agai
   the client back to Alice when it has passed. A client who keeps writing does not move it.
 - **Client writes in human mode.** Alice stays silent. The desk gets an email (once per client per
   10 minutes). The client gets the holding line once per hand-over, not after every message.
-- **Voice notes.** Downloaded from Twilio, transcribed, and treated as the message text for the
-  desk and for Alice. If transcription fails the client is asked to type instead.
+- **Voice notes.** The webhook answers Twilio at once, then downloads the audio from Twilio and
+  transcribes it in the background (up to 60 seconds), so a long note does not hit Twilio's
+  15-second limit. The transcript is the message text for the desk and for Alice. If transcription
+  fails the client is asked to type instead. With `OPENAI_API_KEY` the model is `whisper-1`
+  (`TRANSCRIPTION_MODEL` changes it); files over 25 MB are refused.
 - **No duplicate proactive sends.** Each proactive template claims a row in
   `proactive_send_locks` (client + template + period) before it sends.

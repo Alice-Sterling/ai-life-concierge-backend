@@ -85,6 +85,13 @@ async function main() {
     batcher.stop();
 
     server.close(async () => {
+      // A voice note whose webhook was already answered is still being
+      // transcribed in the background. Give it most of the grace period, so a
+      // deploy does not drop a client's message.
+      await Promise.race([
+        webhookRoutes.whenIdle(),
+        new Promise((resolve) => { setTimeout(resolve, 8_000).unref(); }),
+      ]);
       try {
         await pool.end();
       } catch (err) {

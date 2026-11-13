@@ -74,7 +74,7 @@ twilio.client.messages.create = async (payload) => {
 
 // ---- fetch stub: local calls pass through, Twilio media and Whisper are faked
 const realFetch = global.fetch;
-let whisper = { status: 200, body: { text: 'Book a table for two on Friday' } };
+let whisper = { status: 200, body: { text: 'Book a table for two on Friday' }, delayMs: 0 };
 const outsideCalls = [];
 global.fetch = async (url, opts = {}) => {
   const u = String(url);
@@ -84,6 +84,7 @@ global.fetch = async (url, opts = {}) => {
     return new Response(Buffer.from('OggS-fake-audio-bytes'), { status: 200, headers: { 'content-type': 'audio/ogg' } });
   }
   if (u.includes('/audio/transcriptions')) {
+    if (whisper.delayMs) await new Promise((r) => setTimeout(r, whisper.delayMs));
     return new Response(JSON.stringify(whisper.body), { status: whisper.status, headers: { 'content-type': 'application/json' } });
   }
   return new Response('{}', { status: 404 });
@@ -402,7 +403,14 @@ const settle = () => new Promise((r) => setTimeout(r, 150));
 
   config.transcription.keys.groq = 'gsk_test_key';
   check('with a Groq key: on, provider groq', [transcription.isConfigured(), transcription.provider()], [true, 'groq']);
+  // Whisper takes a while here: the webhook must answer Twilio without waiting for it.
+  whisper.delayMs = 400;
+  const beforeVoice = (await rowsFor(tim.id)).length;
   r = await whatsapp({ ...voice, MessageSid: 'SMvoice1' });
+  check('the webhook answers at once, before the transcript exists',
+    [r.status, r.body.trim(), (await rowsFor(tim.id)).length], [200, '<Response></Response>', beforeVoice]);
+  await webhook.whenIdle();
+  whisper.delayMs = 0;
   log = await rowsFor(tim.id);
   check('transcript logged with the prefix', log[log.length - 1].content, '[AUDIO TRANSCRIPT] Book a table for two on Friday');
   check('marked as a transcribed voice note', log[log.length - 1].metadata.voice_note, 'transcribed');
@@ -411,31 +419,40 @@ const settle = () => new Promise((r) => setTimeout(r, 150));
   check('Alice receives the transcript as the message', queued.body, '[AUDIO TRANSCRIPT] Book a table for two on Friday');
 
   await whatsapp({ ...voice, Body: 'See my note', MessageSid: 'SMvoice2' });
+  await webhook.whenIdle();
   log = await rowsFor(tim.id);
   check('caption and transcript together', log[log.length - 1].content, 'See my note\n[AUDIO TRANSCRIPT] Book a table for two on Friday');
 
-  whisper = { status: 500, body: { error: 'boom' } };
+  whisper = { status: 500, body: { error: 'boom' }, delayMs: 0 };
+  twilioSends.length = 0;
   r = await whatsapp({ ...voice, MessageSid: 'SMvoice3' });
-  check('transcription fails: the client is asked to type', r.body.includes('Could you type that for me?'), true);
+  await webhook.whenIdle();
+  check('transcription fails: the client is asked to type (through the API)',
+    [r.body.trim(), twilioSends.length, twilioSends[0]?.body], ['<Response></Response>', 1, webhook.VOICE_FAILED_REPLY]);
   log = await rowsFor(tim.id);
   check('failure is visible in the chat log', log.slice(-2).map((m) => [m.sender_type, m.metadata.voice_note]), [['user', 'failed'], ['alice', 'failed']]);
 
-  whisper = { status: 200, body: { text: 'should never be used' } };
+  whisper = { status: 200, body: { text: 'should never be used' }, delayMs: 0 };
   outsideCalls.length = 0;
+  twilioSends.length = 0;
   r = await whatsapp({ ...voice, MediaUrl0: 'https://evil.example/steal.ogg', MessageSid: 'SMvoice4' });
-  check('a media URL that is not Twilio is never fetched', [outsideCalls.length, r.body.includes('Could you type that for me?')], [0, true]);
+  await webhook.whenIdle();
+  check('a media URL that is not Twilio is never fetched', [outsideCalls.length, twilioSends[0]?.body], [0, webhook.VOICE_FAILED_REPLY]);
 
   config.transcription.keys.groq = null;
   config.transcription.keys.openai = 'sk-test';
   outsideCalls.length = 0;
   await whatsapp({ ...voice, MessageSid: 'SMvoice5' });
+  await webhook.whenIdle();
+  check('OpenAI key instead: provider openai, model whisper-1', transcription.provider(), 'openai');
   check('OpenAI key instead: goes to OpenAI', outsideCalls.some((u) => u.startsWith('https://api.openai.com/v1/audio/transcriptions')), true);
   config.transcription.keys.openai = null;
 
   await users.setConversationMode(tim.id, 'human', { source: 'admin:test' });
   config.transcription.keys.groq = 'gsk_test_key';
-  whisper = { status: 200, body: { text: 'Please call me back' } };
+  whisper = { status: 200, body: { text: 'Please call me back' }, delayMs: 0 };
   await whatsapp({ ...voice, MessageSid: 'SMvoice6' });
+  await webhook.whenIdle();
   log = await rowsFor(tim.id);
   check('in human mode the desk sees the transcript', log.some((m) => m.content === '[AUDIO TRANSCRIPT] Please call me back'), true);
   config.transcription.keys.groq = null;

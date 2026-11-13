@@ -10,9 +10,11 @@
  *
  * No key -> isConfigured() is false and the webhook behaves as before.
  *
- * The webhook waits for this, and Twilio gives a webhook 15 seconds, so both
- * steps have hard time limits. A slow or failed transcription returns null and
- * the caller tells the client it could not listen.
+ * Both steps have hard time limits. The webhook answers Twilio before it
+ * starts on a voice note (src/routes/webhook.js), so it passes generous
+ * limits; the short defaults are for a caller that is still holding Twilio's
+ * 15-second webhook open. A slow or failed transcription returns null and the
+ * caller tells the client it could not listen.
  */
 
 const { config } = require('../config');
@@ -72,7 +74,7 @@ async function withTimeout(ms, fn) {
 }
 
 /** Download one media file from Twilio. @returns {Promise<Buffer|null>} */
-async function downloadMedia(url, log = logger) {
+async function downloadMedia(url, log = logger, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
   if (!isTwilioMediaUrl(url)) {
     log.warn('transcription.media_url_rejected', {});
     return null;
@@ -80,7 +82,7 @@ async function downloadMedia(url, log = logger) {
   const { accountSid, authToken } = config.twilio;
   if (!accountSid || !authToken) return null;
   try {
-    return await withTimeout(DOWNLOAD_TIMEOUT_MS, async (signal) => {
+    return await withTimeout(timeoutMs, async (signal) => {
       // Twilio answers with a redirect to its media store; fetch follows it
       // and drops the Authorization header on the way, as it should.
       const res = await fetch(url, {
@@ -107,7 +109,7 @@ async function downloadMedia(url, log = logger) {
 const EXTENSIONS = { 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/amr': 'amr', 'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/aac': 'aac' };
 
 /** Send audio bytes to Whisper. @returns {Promise<string|null>} the transcript */
-async function transcribeBuffer(buffer, contentType = 'audio/ogg', log = logger) {
+async function transcribeBuffer(buffer, contentType = 'audio/ogg', log = logger, timeoutMs = TRANSCRIBE_TIMEOUT_MS) {
   const name = provider();
   if (!name) return null;
   const { url, model } = PROVIDERS[name];
@@ -118,7 +120,7 @@ async function transcribeBuffer(buffer, contentType = 'audio/ogg', log = logger)
   form.append('response_format', 'json');
   const startedAt = Date.now();
   try {
-    return await withTimeout(TRANSCRIBE_TIMEOUT_MS, async (signal) => {
+    return await withTimeout(timeoutMs, async (signal) => {
       const res = await fetch(url, {
         method: 'POST',
         headers: { Authorization: `Bearer ${config.transcription.keys[name]}` },
@@ -144,12 +146,12 @@ async function transcribeBuffer(buffer, contentType = 'audio/ogg', log = logger)
  * Transcribe the first voice note of a webhook body.
  * @returns {Promise<string|null>} the transcript, or null when there is none
  */
-async function transcribeWebhookAudio(body, log = logger) {
+async function transcribeWebhookAudio(body, log = logger, { downloadTimeoutMs, transcribeTimeoutMs } = {}) {
   const [first] = audioMedia(body);
   if (!first || !isConfigured()) return null;
-  const buffer = await downloadMedia(first.url, log);
+  const buffer = await downloadMedia(first.url, log, downloadTimeoutMs || DOWNLOAD_TIMEOUT_MS);
   if (!buffer) return null;
-  return transcribeBuffer(buffer, first.contentType, log);
+  return transcribeBuffer(buffer, first.contentType, log, transcribeTimeoutMs || TRANSCRIBE_TIMEOUT_MS);
 }
 
 /** Probe for /health/integrations. Makes no network call: a key is or is not set. */

@@ -264,13 +264,49 @@ router.post('/webhook', async (req, res) => {
     log.error('webhook.signature_check_disabled_in_production', { integration: 'twilio' });
   }
 
-  /** Answer a message the front door stopped. */
-  const respondGate = (reply) => {
+  // --- 1b. Voice notes answer Twilio first --------------------------------
+  // Twilio gives a webhook 15 seconds. Downloading a voice note and running it
+  // through Whisper can take longer (a three-minute note, a slow moment at
+  // the provider), and a webhook that runs out of time is retried and counted
+  // as a failure. So for a voice note the (empty) response goes back now and
+  // the work carries on behind it; replies then leave through the Twilio API
+  // instead of this response. Only possible when that API is configured.
+  const deferred = transcription.audioMedia(req.body).length > 0
+    && transcription.isConfigured() && twilioIntegration.isConfigured();
+  let finished = () => {};
+  if (deferred) {
     res.type('text/xml');
-    return res.send(reply?.via === 'inline'
-      ? legacy.twimlMessage(reply.text)
-      : '<Response></Response>');
+    res.send('<Response></Response>');
+    const pending = new Promise((resolve) => { finished = resolve; });
+    inFlight.add(pending);
+    pending.then(() => inFlight.delete(pending));
+  }
+
+  /** How a reply leaves this handler: in the webhook response, or (deferred) through the API. */
+  const answer = {
+    empty() {
+      if (deferred) return undefined;
+      res.type('text/xml');
+      return res.send('<Response></Response>');
+    },
+    /** `user` set = also write the reply to the chat log (the API path logs by itself). */
+    async text(text, { user = null, flags = {}, log: l = log } = {}) {
+      if (deferred) {
+        await twilioIntegration.sendWhatsApp(phoneNumber, text, l, {
+          userId: user?.id || null, requestId: req.requestId, flags,
+        });
+        return undefined;
+      }
+      if (user) {
+        await messages.outbound(user.id, text, { metadata: { via: 'twiml', request_id: req.requestId, ...flags } }, l);
+      }
+      res.type('text/xml');
+      return res.send(legacy.twimlMessage(text));
+    },
   };
+
+  /** Answer a message the front door stopped. */
+  const respondGate = (reply) => (reply?.via === 'inline' ? answer.text(reply.text) : answer.empty());
 
   // The front door: on for everyone, or only for the test numbers.
   const gateOn = config.gate.enabled
@@ -330,7 +366,9 @@ router.post('/webhook', async (req, res) => {
     const hasAudio = transcription.audioMedia(req.body).length > 0;
     let voiceFailed = false;
     if (hasAudio && transcription.isConfigured()) {
-      const transcript = await transcription.transcribeWebhookAudio(req.body, userLog);
+      // Deferred: Twilio already has its answer, so a long note gets the time it needs.
+      const transcript = await transcription.transcribeWebhookAudio(req.body, userLog,
+        deferred ? { downloadTimeoutMs: 15_000, transcribeTimeoutMs: 60_000 } : {});
       if (transcript) {
         incomingText = [incomingText, `${messages.AUDIO_PREFIX} ${transcript}`].filter(Boolean).join('\n');
         userLog.info('webhook.voice_note_transcribed', { chars: transcript.length });
@@ -352,12 +390,8 @@ router.post('/webhook', async (req, res) => {
         ...(hasAudio ? { voice_note: voiceFailed ? 'failed' : (transcription.isConfigured() ? 'transcribed' : 'not_configured') } : {}),
       }, userLog);
 
-    /** Reply in the webhook response, and put the reply in the chat log. */
-    const sendTwiml = async (text, flags = {}) => {
-      await messages.outbound(user.id, text, { metadata: { via: 'twiml', request_id: req.requestId, ...flags } }, userLog);
-      res.type('text/xml');
-      return res.send(legacy.twimlMessage(text));
-    };
+    /** Reply to the client, and put the reply in the chat log. */
+    const sendTwiml = (text, flags = {}) => answer.text(text, { user, flags, log: userLog });
 
     // --- 2b. Front door ---------------------------------------------------
     // Status routing before anything else: only Active members reach Alice.
@@ -408,18 +442,15 @@ router.post('/webhook', async (req, res) => {
       const acknowledged = await messages.sentSince(user.id, 'human_ack', since, userLog);
 
       userLog.info('webhook.queued_for_human', { acknowledged_before: acknowledged });
-      if (acknowledged) {
-        res.type('text/xml');
-        return res.send('<Response></Response>');
-      }
-      return sendTwiml(HUMAN_MODE_ACK, { human_ack: true });
+      if (acknowledged) return answer.empty();
+      return await sendTwiml(HUMAN_MODE_ACK, { human_ack: true });
     }
 
     // A voice note with no usable text: say so, rather than send Alice an
     // empty message. Only when transcription is switched on and failed.
     if (voiceFailed && !incomingText) {
       await conversations.save(user.id, messages.VOICE_PLACEHOLDER, VOICE_FAILED_REPLY, { voice_note: 'failed' }, userLog);
-      return sendTwiml(VOICE_FAILED_REPLY, { voice_note: 'failed' });
+      return await sendTwiml(VOICE_FAILED_REPLY, { voice_note: 'failed' });
     }
 
     // --- 4. Batching -------------------------------------------------------
@@ -450,8 +481,7 @@ router.post('/webhook', async (req, res) => {
       if (queued) {
         // Empty TwiML either way: a duplicate Twilio retry must not be answered
         // twice, and a queued message is answered later through the API.
-        res.type('text/xml');
-        return res.send('<Response></Response>');
+        return answer.empty();
       }
     }
 
@@ -460,7 +490,7 @@ router.post('/webhook', async (req, res) => {
       phoneNumber, profileName, requestId: req.requestId, log: userLog,
     });
 
-    return sendTwiml(replyBody);
+    return await sendTwiml(replyBody);
   } catch (err) {
     log.error('webhook.failed', { message: err.message, stack: err.stack });
     // For the alarm email (src/services/alarms.js). Best-effort: when the
@@ -473,14 +503,26 @@ router.post('/webhook', async (req, res) => {
     // Twilio retries on 5xx, which would replay the whole flow. A 200 with a
     // polite message stops the loop; the failure is in the logs and, for
     // automation runs, in automation_logs.
-    res.type('text/xml');
-    return res.send(legacy.twimlMessage(
-      'Apologies, I hit a problem handling that. Please try again in a moment.'));
+    try {
+      return await answer.text('Apologies, I hit a problem handling that. Please try again in a moment.');
+    } catch (sendErr) {
+      log.error('webhook.apology_not_sent', { message: sendErr.message });
+      return undefined;
+    }
+  } finally {
+    finished();
   }
 });
+
+/** Voice notes still being worked on after their webhook was answered. */
+const inFlight = new Set();
+
+/** Resolves when no deferred voice note is in progress. For tests and a clean shutdown. */
+const whenIdle = () => Promise.all([...inFlight]);
 
 module.exports = router;
 module.exports.runConversationFlow = runConversationFlow;
 module.exports.isTrialNudgeAnswer = isTrialNudgeAnswer;
 module.exports.VOICE_FAILED_REPLY = VOICE_FAILED_REPLY;
+module.exports.whenIdle = whenIdle;
 module.exports.HUMAN_MODE_ACK = HUMAN_MODE_ACK;
