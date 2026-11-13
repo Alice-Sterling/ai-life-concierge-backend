@@ -34,8 +34,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # node_modules is committed in this repository; the suite runs against
-      # exactly what is deployed, so nothing is installed here.
+      # Part of node_modules is committed, but not all of it (helmet, for one,
+      # is missing), so the packages are installed from the lockfile, the same
+      # way the deploy does it.
+      - name: Install packages
+        run: npm ci --no-audit --no-fund
       - name: Unit tests (no database)
         run: node tests/flows-unit.cjs && node tests/agents/agent-modules.cjs
       - name: Full suite (throwaway Postgres)
