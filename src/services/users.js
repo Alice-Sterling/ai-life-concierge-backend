@@ -8,7 +8,26 @@
 const db = require('../db/pool');
 const airtable = require('../integrations/airtable');
 const events = require('./events');
+const messages = require('./messages');
+const { config } = require('../config');
 const { logger } = require('../lib/logger');
+
+const UNDEFINED_COLUMN = '42703';
+
+/** The line the chat view shows when the mode changes, by who changed it. */
+function modeNote(mode, source) {
+  const who = String(source || 'admin');
+  if (mode === 'human') {
+    if (who.startsWith('alice_handoff')) return 'Human mode engaged: Alice handed this client to the desk.';
+    if (who.startsWith('airtable')) return 'Human mode engaged (set in Airtable).';
+    if (who.startsWith('admin:')) return `Human mode engaged by ${who.slice(6)}.`;
+    return 'Human mode engaged.';
+  }
+  if (who === 'auto_resume') return 'Alice resumed automatically: the human window ended.';
+  if (who.startsWith('airtable')) return 'Alice resumed (set in Airtable).';
+  if (who.startsWith('admin:')) return `Alice resumed by ${who.slice(6)}.`;
+  return 'Alice resumed.';
+}
 
 const CONVERSATION_MODES = ['ai', 'human'];
 
@@ -60,12 +79,26 @@ async function setConversationMode(userId, mode, { requestId = null, source = 'a
   }
 
   // The timestamp starts the auto-resume clock (src/jobs/humanModeResume.js).
+  // The previous mode comes back too, so the chat view gets a note only when
+  // the mode really changed.
   const { rows } = await db.query(
-    `UPDATE users SET conversation_mode = $2, conversation_mode_changed_at = NOW()
-      WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}`,
+    `WITH old AS (SELECT conversation_mode AS previous_mode FROM users WHERE id = $1)
+     UPDATE users SET conversation_mode = $2, conversation_mode_changed_at = NOW()
+       FROM old
+      WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}, old.previous_mode`,
     [userId, mode], log);
   const user = rows[0];
   if (!user) return null;
+  const previousMode = user.previous_mode;
+  delete user.previous_mode;
+
+  // Human mode ends by itself HUMAN_MODE_TIMEOUT_MINUTES after the last human
+  // action. Its own statement, so the mode switch above still works on a
+  // database that does not have the column yet (migration 008).
+  user.human_override_until = await setHumanOverride(userId, mode, log);
+  if (previousMode !== mode) {
+    await messages.system(userId, modeNote(mode, source), { event: 'conversation_mode', mode, source }, log);
+  }
 
   log.info('user.conversation_mode_changed', { user_id: userId, conversation_mode: mode, source });
   await events.record(events.EVENT.CONVERSATION_MODE_CHANGED, {
@@ -127,14 +160,67 @@ async function claimWelcome(userId, log = logger) {
 }
 
 /**
- * Users in human mode with no activity either way for `minutes`.
+ * Start, move or clear the human window.
+ * @returns {Promise<string|null>} the new human_override_until
+ */
+async function setHumanOverride(userId, mode, log = logger) {
+  const minutes = config.gate.humanModeTimeoutMinutes;
+  try {
+    const { rows } = await db.query(
+      `UPDATE users
+          SET human_override_until = CASE
+            WHEN $2::text = 'human' AND $3::int > 0 THEN NOW() + make_interval(mins => $3::int)
+            ELSE NULL END
+        WHERE id = $1
+        RETURNING human_override_until`,
+      [userId, mode, minutes], log);
+    return rows[0]?.human_override_until ?? null;
+  } catch (err) {
+    log.warn('user.human_override_not_set', { user_id: userId, message: err.message, code: err.code });
+    return null;
+  }
+}
+
+/**
+ * A human just acted for a client who is already in human mode (sent a
+ * message): the window starts again from now. No mode change, so no Airtable
+ * push and no chat note.
+ */
+async function extendHumanOverride(userId, log = logger) {
+  return setHumanOverride(userId, 'human', log);
+}
+
+/**
+ * Users whose human window has ended.
  *
- * Activity is the later of the hand-off itself and the last message in the
- * conversation, so a client still talking to the desk is not handed back
- * mid-thread. Operator replies sent outside this service (the Twilio console)
- * are not visible here.
+ * The window is human_override_until: set at the hand-over and moved forward
+ * by every human action (a take-over, a message from the desk). A client who
+ * keeps writing does NOT move it: if the desk has gone quiet for the whole
+ * window, Alice takes the client back rather than leaving them unanswered.
+ * Rows from before the column existed fall back to the mode-change time.
  */
 async function findStaleHumanMode(minutes, log = logger) {
+  try {
+    const { rows } = await db.query(
+      `SELECT u.id, u.first_name, u.phone_number
+         FROM users u
+        WHERE u.conversation_mode = 'human'
+          AND COALESCE(u.human_override_until,
+                       COALESCE(u.conversation_mode_changed_at, 'epoch') + make_interval(mins => $1::int))
+              < NOW()`,
+      [minutes], log);
+    return rows;
+  } catch (err) {
+    if (err.code !== UNDEFINED_COLUMN) throw err;
+    return findStaleHumanModeLegacy(minutes, log);
+  }
+}
+
+/**
+ * The same question before migration 008: quiet either way for `minutes`.
+ * Kept so the job keeps working if the code is deployed before the SQL.
+ */
+async function findStaleHumanModeLegacy(minutes, log = logger) {
   const { rows } = await db.query(
     `SELECT u.id, u.first_name, u.phone_number
        FROM users u
@@ -147,6 +233,48 @@ async function findStaleHumanMode(minutes, log = logger) {
             < NOW() - make_interval(mins => $1::int)`,
     [minutes], log);
   return rows;
+}
+
+/**
+ * The Command Center's extra columns for a set of users, keyed by id.
+ * Separate from PUBLIC_COLUMNS on purpose: those are read on every WhatsApp
+ * message, and a column missing there would take the line down.
+ * @returns {Promise<Object<string, object>>} {} when migration 008 is not applied
+ */
+async function commandCenterFields(userIds, log = logger) {
+  if (!userIds?.length) return {};
+  try {
+    const { rows } = await db.query(
+      `SELECT id, account_status, cohort_id, trial_duration_days, human_override_until,
+              activated_at, trial_start_date,
+              calendar_provider, calendar_disconnected_at, calendar_token_last_refreshed_at,
+              calendar_token_status
+         FROM users WHERE id = ANY($1::uuid[])`,
+      [userIds], log);
+    return Object.fromEntries(rows.map((r) => [r.id, r]));
+  } catch (err) {
+    log.warn('user.command_center_fields_unavailable', { message: err.message, code: err.code });
+    return {};
+  }
+}
+
+/**
+ * When the trial ends and how many days are left, from the activation date
+ * (the trial start for clients never activated) and trial_duration_days.
+ * @returns {{ trial_started_at, trial_ends_at, trial_days_left }|null}
+ */
+function trialWindow(row, now = new Date()) {
+  const anchor = row?.activated_at || row?.trial_start_date;
+  const days = Number(row?.trial_duration_days);
+  if (!anchor || !Number.isFinite(days) || days <= 0) return null;
+  const start = new Date(anchor);
+  if (Number.isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime() + days * 86400e3);
+  return {
+    trial_started_at: start.toISOString(),
+    trial_ends_at: end.toISOString(),
+    trial_days_left: Math.ceil((end.getTime() - now.getTime()) / 86400e3),
+  };
 }
 
 /**
@@ -223,7 +351,13 @@ module.exports = {
   ONBOARDING_PHASES,
   normalizePhase,
   claimWelcome,
+  modeNote,
+  setHumanOverride,
+  extendHumanOverride,
+  commandCenterFields,
+  trialWindow,
   findStaleHumanMode,
+  findStaleHumanModeLegacy,
   findById,
   listRecent,
   setConversationMode,

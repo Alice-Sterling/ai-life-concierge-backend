@@ -87,6 +87,26 @@ function profileBlock(user) {
   return `\n### USER PROFILE CONTEXT\n${lines.join('\n')}\nUse these as known facts. Never ask for anything listed here.\n`;
 }
 
+/**
+ * The same profile facts as profileBlock(), as { label: value } for the
+ * Command Center's context panel. Empty fields are left out.
+ */
+function profileFacts(user) {
+  const prefs = parseMaybeJson(user?.preferences) || {};
+  const out = {};
+  const automations = parseMaybeJson(user?.active_automations)
+    || pick(prefs, ['active_automations', 'activeAutomations']);
+  if (!isEmpty(automations)) {
+    const list = Array.isArray(automations) ? automations : String(automations).split(',');
+    out['Active Automations'] = list.map((a) => titleCase(String(a).trim())).filter(Boolean).join(', ');
+  }
+  for (const [label, keys] of PROFILE_FIELDS) {
+    const v = pick(prefs, keys);
+    if (!isEmpty(v)) out[label] = asText(v);
+  }
+  return out;
+}
+
 async function tasksBlock(userId, log = logger) {
   if (!userId) return '';
   try {
@@ -128,4 +148,4 @@ function homeCity(user) {
   return isEmpty(v) ? null : asText(v);
 }
 
-module.exports = { profileBlock, tasksBlock, calendarBlock, homeCity, OPEN_STATUSES };
+module.exports = { profileBlock, profileFacts, tasksBlock, calendarBlock, homeCity, OPEN_STATUSES };

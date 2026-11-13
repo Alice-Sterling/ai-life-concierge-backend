@@ -17,6 +17,8 @@ if (!process.env.DATABASE_URL) {
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_API_TOKEN = 'test-admin-token-12345';
 process.env.STRIPE_SECRET_KEY = 'sk_test_fake_for_lifecycle';
+// The Airtable pull (11 Nov) is on by default; "everything off" below means it too.
+process.env.AIRTABLE_PULL_ENABLED = 'false';
 for (const k of ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM', 'AIRTABLE_API_KEY',
   'EMAIL_HOST', 'STRIPE_WEBHOOK_SECRET', 'STATUS_GATE_ENABLED']) {
   delete process.env[k];

@@ -18,7 +18,8 @@ const express = require('express');
 const { config } = require('./config');
 const { requestId } = require('./middleware/requestId');
 const { securityHeaders, generalLimiter, adminLimiter } = require('./middleware/security');
-const { adminAuth } = require('./middleware/adminAuth');
+const { adminAuth, requireWrite, adminCors } = require('./middleware/adminAuth');
+const { adminAudit } = require('./middleware/adminAudit');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 const { webhookLimiter } = require('./middleware/security');
 const healthRoutes = require('./routes/health');
@@ -67,7 +68,9 @@ function createApp() {
   // Short links Alice sends in WhatsApp: /go/<code> -> the booking page.
   app.use(linkRoutes);
 
-  app.use('/admin', adminLimiter(), adminAuth(), adminRoutes);
+  // CORS answers the browser's preflight; the audit trail sits before auth so
+  // refused calls are recorded too; read-only tokens stop at requireWrite.
+  app.use('/admin', adminCors(), adminLimiter(), adminAudit(), adminAuth(), requireWrite(), adminRoutes);
 
   app.use(portalRoutes);
 

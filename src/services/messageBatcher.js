@@ -129,7 +129,7 @@ async function sendReply(userId, to, body, requestId, log = logger) {
   );
   const outboundId = rows[0].id;
 
-  const ok = await twilio.sendWhatsApp(to, body, log);
+  const ok = await twilio.sendWhatsApp(to, body, log, { userId, requestId });
 
   await db.query(
     'UPDATE outbound_messages SET status = $2 WHERE id = $1',

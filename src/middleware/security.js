@@ -48,7 +48,9 @@ function generalLimiter() {
 function adminLimiter() {
   return rateLimit({
     windowMs: 60_000,
-    limit: 30,
+    // 120 a minute per address: room for the Command Center to refresh its
+    // inbox and open chat every few seconds. ADMIN_RATE_LIMIT_MAX changes it.
+    limit: config.security.adminRateLimitMax,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many admin requests.' },

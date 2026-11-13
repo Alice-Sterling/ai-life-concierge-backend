@@ -1,18 +1,23 @@
 /**
  * Internal admin API (brief section 2E).
  *
- *   GET  /admin/users                  recent users and their onboarding phase
+ *   GET  /admin/users                  recent users: status, cohort, mode, trial
+ *   GET  /admin/inbox                  every client with their last message, newest first
  *   GET  /admin/tasks                  recent tasks, optionally filtered by status
- *   GET  /admin/conversations/:userId  recent chat history for one user
- *   POST /admin/users/:userId/mode     toggle conversation_mode between ai and human
+ *   GET  /admin/conversations/:userId  one client's messages (and the exchange history)
+ *   GET  /admin/users/:userId/context  status, cohort, trial, preferences, 3 latest tasks
+ *   POST /admin/users/:userId/mode     ai <-> human; (re)starts the human window
+ *   POST /admin/messages/send          a human writes to a client; sets human mode
+ *   GET  /admin/audit                  who called what (admin_audit_logs)
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
  *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
  *   GET  /admin/alarms                 what failed recently, with a likely fix (read by the n8n alarm)
  *   POST /admin/test/:userId/date-night-due  make a test user's date night due now
  *   POST /admin/test/:userId/run             run the proactive jobs now, for that user only
  *
- * JSON only. No HTML dashboard, as specified. Every route sits behind the admin
- * bearer token and a tight rate limit, applied where the router is mounted.
+ * JSON only. Every route sits behind a named admin token with a read or write
+ * scope, an optional IP allowlist, a tight rate limit and the audit trail,
+ * all applied where the router is mounted (src/app.js).
  */
 
 const express = require('express');
@@ -25,6 +30,9 @@ const lifecycle = require('../services/lifecycle');
 const dateNight = require('../services/dateNight');
 const proactiveFlows = require('../services/proactiveFlows');
 const alarms = require('../services/alarms');
+const messages = require('../services/messages');
+const commandCenter = require('../services/commandCenter');
+const adminAudit = require('../middleware/adminAudit');
 const db = require('../db/pool');
 const { config } = require('../config');
 
@@ -39,7 +47,38 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 
 router.get('/users', wrap(async (req, res) => {
   const rows = await users.listRecent({ limit: req.query.limit }, req.log);
-  res.json({ count: rows.length, users: rows, request_id: req.requestId });
+  // Project 4 columns (account_status, cohort_id, trial, human window). Read
+  // apart from the main list so this route still answers before migration 008.
+  const extra = await users.commandCenterFields(rows.map((u) => u.id), req.log);
+  const list = rows.map((u) => {
+    const e = extra[u.id];
+    if (!e) return { ...u, mode: u.conversation_mode };
+    return {
+      ...u,
+      mode: u.conversation_mode,
+      account_status: e.account_status,
+      cohort_id: e.cohort_id,
+      trial_duration_days: e.trial_duration_days,
+      human_override_until: e.human_override_until,
+      calendar_token_status: e.calendar_token_status,
+      ...(users.trialWindow(e) || {}),
+    };
+  });
+  res.json({ count: list.length, users: list, request_id: req.requestId });
+}));
+
+/**
+ * The inbox (pane 1): every client with the last message, most recently
+ * active first. `unread` = the client is with a human and wrote last.
+ */
+router.get('/inbox', wrap(async (req, res) => {
+  const threads = await messages.inbox({ limit: req.query.limit }, req.log);
+  res.json({
+    count: threads.length,
+    unread: threads.filter((t) => t.unread).length,
+    threads,
+    request_id: req.requestId,
+  });
 }));
 
 router.get('/tasks', wrap(async (req, res) => {
@@ -66,6 +105,18 @@ router.get('/conversations/:userId', wrap(async (req, res) => {
   }
 
   const history = await conversations.getHistory(userId, { limit: req.query.limit }, req.log);
+
+  // `messages` is the chat view's list: one row per message, with direction
+  // and sender_type (user | alice | human_agent | system). `conversations`
+  // stays for existing callers: one row per exchange, as Alice reads it.
+  let thread = [];
+  try {
+    thread = await messages.listForUser(userId, { limit: req.query.limit, before: req.query.before || null }, req.log);
+  } catch (err) {
+    req.log.warn('admin.messages_unavailable', { message: err.message, code: err.code });
+  }
+  const extra = (await users.commandCenterFields([userId], req.log))[userId] || {};
+
   res.json({
     user: {
       id: user.id,
@@ -73,12 +124,62 @@ router.get('/conversations/:userId', wrap(async (req, res) => {
       last_name: user.last_name,
       phone_number: user.phone_number,
       conversation_mode: user.conversation_mode,
+      human_override_until: extra.human_override_until ?? null,
       onboarding_phase: user.onboarding_phase,
+      account_status: extra.account_status ?? null,
     },
     count: history.length,
     conversations: history,
+    message_count: thread.length,
+    messages: thread,
     request_id: req.requestId,
   });
+}));
+
+/** The context panel (pane 3) for one client. */
+router.get('/users/:userId/context', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!UUID.test(userId)) {
+    return res.status(400).json({ error: 'userId must be a UUID', request_id: req.requestId });
+  }
+  const ctx = await commandCenter.context(userId, req.log);
+  if (!ctx) return res.status(404).json({ error: 'User not found', request_id: req.requestId });
+  res.json({ ...ctx, request_id: req.requestId });
+}));
+
+/**
+ * A person on the desk sends a WhatsApp message.
+ *
+ *   { user_id, content }
+ *
+ * Logs it as 'human_agent', sends it through Twilio and puts the client in
+ * human mode (Alice stays quiet until the human window ends or the client is
+ * handed back). 409 outside_24h_window when WhatsApp would not deliver it.
+ */
+router.post('/messages/send', wrap(async (req, res) => {
+  const userId = req.body?.user_id ?? req.body?.userId;
+  if (!UUID.test(String(userId || ''))) {
+    return res.status(400).json({ error: 'user_id must be a UUID', request_id: req.requestId });
+  }
+  try {
+    const sent = await commandCenter.sendHumanMessage({
+      userId, content: req.body?.content ?? req.body?.message, actor: req.admin?.actor || 'admin', requestId: req.requestId,
+    }, req.log);
+    res.json({ ok: true, ...sent, request_id: req.requestId });
+  } catch (err) {
+    if (!err.expose) throw err;
+    res.status(err.status).json({ ok: false, error: err.message, code: err.code, request_id: req.requestId });
+  }
+}));
+
+/** The audit trail, newest first. Optional ?user_id= and ?actor=. */
+router.get('/audit', wrap(async (req, res) => {
+  const userId = req.query.user_id || null;
+  if (userId && !UUID.test(userId)) {
+    return res.status(400).json({ error: 'user_id must be a UUID', request_id: req.requestId });
+  }
+  const rows = await adminAudit.list({ limit: req.query.limit, userId, actor: req.query.actor || null }, req.log);
+  res.json({ count: rows.length, entries: rows, request_id: req.requestId });
 }));
 
 router.post('/users/:userId/mode', wrap(async (req, res) => {
@@ -95,8 +196,10 @@ router.post('/users/:userId/mode', wrap(async (req, res) => {
     });
   }
 
+  // The actor goes into the event and the chat note ("Human mode engaged by ...").
+  // Setting 'human' again is allowed: it restarts the human window.
   const updated = await users.setConversationMode(
-    userId, mode, { requestId: req.requestId }, req.log);
+    userId, mode, { requestId: req.requestId, source: `admin:${req.admin?.actor || 'admin'}` }, req.log);
 
   if (!updated) {
     return res.status(404).json({ error: 'User not found', request_id: req.requestId });
@@ -106,6 +209,7 @@ router.post('/users/:userId/mode', wrap(async (req, res) => {
     ok: true,
     user_id: updated.id,
     conversation_mode: updated.conversation_mode,
+    human_override_until: updated.human_override_until ?? null,
     request_id: req.requestId,
   });
 }));

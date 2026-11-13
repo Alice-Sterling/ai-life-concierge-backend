@@ -3,6 +3,8 @@
  *
  *   GET /health               liveness. No I/O. Safe for Railway's health probe.
  *   GET /health/integrations  connectivity to every external dependency.
+ *   GET /health/airtable-schema  the Airtable tables and fields the backend
+ *                             depends on still exist (also checked at boot).
  *
  * /health/integrations makes real network calls, including a metered Anthropic
  * request, so it is not the endpoint to point an uptime monitor at. Use /health
@@ -17,6 +19,7 @@ const anthropic = require('../integrations/anthropic');
 const email = require('../integrations/email');
 const airtable = require('../integrations/airtable');
 const stripeClient = require('../integrations/stripe');
+const transcription = require('../integrations/transcription');
 
 const router = express.Router();
 
@@ -44,6 +47,9 @@ router.get('/health/integrations', async (req, res) => {
     airtable.healthCheck(),
     stripeClient.healthCheck(),
   ]);
+  // No network call: reports whether a Whisper key is set. Kept out of the
+  // overall status, because voice notes without a key are a choice, not a fault.
+  const voiceNotes = transcription.healthCheck();
 
   const integrations = {};
   settled.forEach((result, i) => {
@@ -71,7 +77,37 @@ router.get('/health/integrations', async (req, res) => {
     duration_ms: Date.now() - startedAt,
     request_id: req.requestId,
     integrations,
+    voice_notes: voiceNotes,
     config: { missing_required: missingRequired, missing_recommended: missingRecommended },
+  });
+});
+
+/**
+ * Has anyone renamed or deleted an Airtable table or field the backend uses?
+ *
+ * Airtable is edited by hand, and a renamed column makes a sync fail without
+ * any error the desk would see. 200 = everything is there; 503 = something is
+ * missing, with the list. The answer is cached for five minutes (?fresh=1
+ * checks again), so a monitor can poll it without spending the Airtable quota.
+ */
+const SCHEMA_CACHE_MS = 5 * 60_000;
+let schemaCache = { at: 0, result: null };
+
+router.get('/health/airtable-schema', async (req, res) => {
+  const fresh = req.query.fresh === '1' || req.query.fresh === 'true';
+  if (fresh || !schemaCache.result || Date.now() - schemaCache.at > SCHEMA_CACHE_MS) {
+    try {
+      schemaCache = { at: Date.now(), result: await airtable.schemaCheck(req.log) };
+    } catch (err) {
+      schemaCache = { at: Date.now(), result: { status: 'error', problems: [err.message] } };
+    }
+  }
+  const { result, at } = schemaCache;
+  res.status(result.status === 'error' ? 503 : 200).json({
+    ...result,
+    checked_at: new Date(at).toISOString(),
+    cached: !fresh && Date.now() - at > 1000,
+    request_id: req.requestId,
   });
 });
 

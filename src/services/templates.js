@@ -18,6 +18,7 @@
 
 const db = require('../db/pool');
 const twilio = require('../integrations/twilio');
+const sendLocks = require('./sendLocks');
 const { config } = require('../config');
 const { logger } = require('../lib/logger');
 
@@ -256,12 +257,20 @@ async function inWindow(userId, log = logger) {
  *   via 'inline' means Twilio is not configured and the caller should put
  *   `text` in the TwiML response instead.
  */
-async function send(key, { to, user = null, inWindow = true, requestId = null, data = {} } = {}, log = logger) {
+async function send(key, { to, user = null, inWindow = true, requestId = null, data = {}, periodKey = null } = {}, log = logger) {
   const tpl = TEMPLATES[key];
   if (!tpl) throw new Error(`Unknown template: ${key}`);
 
   const text = tpl.text(user, data);
   const sid = config.templates[key];
+
+  // A proactive send names its period ("2026-W46", an event key). The lock
+  // lets one caller through per client, template and period, so a retried
+  // job or a second instance cannot send it twice.
+  if (periodKey && user?.id && !(await sendLocks.claim(user.id, key, periodKey, log))) {
+    return { sent: false, text, via: 'none', duplicate: true };
+  }
+  const meta = { userId: user?.id || null, text, templateKey: key, requestId };
 
   let via;
   let ok;
@@ -273,16 +282,20 @@ async function send(key, { to, user = null, inWindow = true, requestId = null, d
     ok = true;
   } else if (sid) {
     via = 'template';
-    ok = await twilio.sendTemplate(to, sid, tpl.variables(user, data), log);
+    ok = await twilio.sendTemplate(to, sid, tpl.variables(user, data), log, meta);
   } else if (inWindow) {
     via = 'text';
-    ok = await twilio.sendWhatsApp(to, text, log);
+    ok = await twilio.sendWhatsApp(to, text, log, meta);
   } else {
     // Outside the window Meta drops free text, so sending it would only look
     // like it worked.
     log.warn('template.not_configured', { template: key, env: `TWILIO_TPL_${key.toUpperCase()}` });
+    if (periodKey && user?.id) await sendLocks.release(user.id, key, periodKey, log);
     return { sent: false, text, via: 'none' };
   }
+
+  // Twilio refused it: give the claim back so the next run can try again.
+  if (!ok && periodKey && user?.id) await sendLocks.release(user.id, key, periodKey, log);
 
   if (user?.id) {
     await db.query(

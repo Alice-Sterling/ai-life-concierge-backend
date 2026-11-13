@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const db = require('../db/pool');
 const { config } = require('../config');
 const templates = require('./templates');
+const sendLocks = require('./sendLocks');
 const events = require('./events');
 const calendar = require('./calendar');
 const flights = require('./flights');
@@ -107,7 +108,10 @@ async function runWeeklyBriefings(log = logger, { userId = null, ignoreHour = fa
     const userLog = log.child({ user_id: u.id });
     const inWindow = await templates.inWindow(u.id, userLog);
     if (!config.templates.weekly_briefing && !inWindow) { result.skipped += 1; continue; }
-    const sent = await templates.send('weekly_briefing', { to: u.phone_number, user: u, inWindow }, userLog);
+    // One briefing per ISO week. The admin test tool (ignoreHour) is left free to repeat.
+    const sent = await templates.send('weekly_briefing', {
+      to: u.phone_number, user: u, inWindow, periodKey: ignoreHour ? null : sendLocks.isoWeek(now),
+    }, userLog);
     if (sent.sent) {
       result.sent += 1;
       await events.record('weekly_briefing_pinged', { userId: u.id, metadata: { via: sent.via } }, userLog);
@@ -176,7 +180,7 @@ async function runMilestonePings(log = logger, {
     const inWindow = await templates.inWindow(u.id, userLog);
     if (!config.templates.milestone_ping && !inWindow) { result.skipped += 1; continue; }
     const sent = await templates.send('milestone_ping', {
-      to: u.phone_number, user: u, inWindow, data: { eventType: pick.type },
+      to: u.phone_number, user: u, inWindow, data: { eventType: pick.type }, periodKey: pick.key,
     }, userLog);
     if (sent.sent) {
       result.sent += 1;
@@ -251,6 +255,7 @@ async function runTransitPings(log = logger, {
     const date = flights.ordinalDate(pick.start, u.active_timezone);
     const sent = await templates.send('transit_ping', {
       to: u.phone_number, user: u, inWindow, data: { destination: pick.destination || pick.flight, date },
+      periodKey: pick.key,
     }, userLog);
     if (sent.sent) {
       result.sent += 1;
@@ -343,7 +348,7 @@ async function runTravelPings(log = logger, {
     const inWindow = await templates.inWindow(u.id, userLog);
     if (!config.templates.travel_ping && !inWindow) { result.skipped += 1; continue; }
     const sent = await templates.send('travel_ping', {
-      to: u.phone_number, user: u, inWindow, data: { destination: pick.destination },
+      to: u.phone_number, user: u, inWindow, data: { destination: pick.destination }, periodKey: pick.key,
     }, userLog);
     if (sent.sent) {
       result.sent += 1;

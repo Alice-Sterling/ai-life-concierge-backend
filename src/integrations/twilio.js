@@ -5,6 +5,7 @@
 const twilio = require('twilio');
 const { config } = require('../config');
 const { logger } = require('../lib/logger');
+const messages = require('../services/messages');
 
 const client =
   config.twilio.accountSid && config.twilio.authToken
@@ -46,8 +47,15 @@ function validateSignature(req) {
 // how the environment variable happened to be typed.
 const withChannel = (n) => (String(n).startsWith('whatsapp:') ? String(n) : `whatsapp:${n}`);
 
-/** One send path for text and templates, so both log and fail the same way. */
-async function send(to, content, log) {
+/**
+ * One send path for text and templates, so both log and fail the same way.
+ *
+ * Every accepted send is also written to the message log (the Command
+ * Center's chat view), here rather than in each caller so none can forget.
+ * `meta`: { userId?, text?, senderType?, templateKey?, actor?, requestId? }.
+ * meta.text is the readable text of a template; meta.log = false skips the log.
+ */
+async function send(to, content, log, meta = {}) {
   if (!isConfigured()) {
     log.warn('twilio.not_configured', { integration: 'twilio' });
     return false;
@@ -59,6 +67,21 @@ async function send(to, content, log) {
       ...content,
     });
     log.info('twilio.message_sent', { integration: 'twilio', message_sid: msg.sid });
+    if (meta.log !== false) {
+      await messages.outboundSent({
+        to,
+        userId: meta.userId || null,
+        content: content.body || meta.text || '',
+        senderType: meta.senderType || 'alice',
+        metadata: {
+          twilio_sid: msg.sid,
+          ...(meta.templateKey ? { template_key: meta.templateKey } : {}),
+          ...(meta.actor ? { actor: meta.actor } : {}),
+          ...(meta.requestId ? { request_id: meta.requestId } : {}),
+          ...(meta.flags || {}),
+        },
+      }, log);
+    }
     return true;
   } catch (err) {
     log.error('twilio.send_failed', {
@@ -75,8 +98,8 @@ async function send(to, content, log) {
  * window that opens when the client last wrote to us.
  * @returns {Promise<boolean>} whether Twilio accepted it
  */
-async function sendWhatsApp(to, body, log = logger) {
-  return send(to, { body }, log);
+async function sendWhatsApp(to, body, log = logger, meta = {}) {
+  return send(to, { body }, log, meta);
 }
 
 /**
@@ -87,8 +110,8 @@ async function sendWhatsApp(to, body, log = logger) {
  * @param {object} variables  {"1": "Sam", "2": "Ai-ABC123"} - numbered from 1, in order
  * @returns {Promise<boolean>} whether Twilio accepted it
  */
-async function sendTemplate(to, contentSid, variables = {}, log = logger) {
-  return send(to, { contentSid, contentVariables: JSON.stringify(variables) }, log);
+async function sendTemplate(to, contentSid, variables = {}, log = logger, meta = {}) {
+  return send(to, { contentSid, contentVariables: JSON.stringify(variables) }, log, meta);
 }
 
 /** Probe: fetch the account record. Read-only and cheap. */

@@ -263,7 +263,7 @@ const waitHours = (hours, { ignoreWait = false } = {}) => (ignoreWait ? 0 : hour
  */
 async function runOnboardingReminders(log = logger, opts = {}) {
   const { rows } = await db.query(
-    `SELECT u.*
+    `SELECT u.*, inv.invited_at
        FROM users u
        JOIN LATERAL (
          SELECT MAX(created_at) AS invited_at FROM outbound_messages
@@ -286,6 +286,7 @@ async function runOnboardingReminders(log = logger, opts = {}) {
     if (!reach.ok) { result.skipped += 1; continue; }
     const sent = await templates.send('onboarding_reminder', {
       to: u.phone_number, user: u, inWindow: reach.inWindow,
+      periodKey: u.invited_at ? `invite:${new Date(u.invited_at).toISOString()}` : null,
     }, userLog);
     if (sent.sent) {
       result.sent += 1;
@@ -324,7 +325,10 @@ async function runHandshakePings(log = logger, opts = {}) {
     const userLog = log.child({ user_id: u.id });
     // Quiet for 24h means outside the window: only the approved template works.
     if (!config.templates.handshake_ping) { result.skipped += 1; continue; }
-    const sent = await templates.send('handshake_ping', { to: u.phone_number, user: u, inWindow: false }, userLog);
+    const sent = await templates.send('handshake_ping', {
+      to: u.phone_number, user: u, inWindow: false,
+      periodKey: u.activated_at ? `activated:${new Date(u.activated_at).toISOString()}` : null,
+    }, userLog);
     if (sent.sent) result.sent += 1;
   }
   log.info('lifecycle.handshake_pings_done', result);
@@ -361,7 +365,10 @@ async function runProposalNudges(log = logger, opts = {}) {
   for (const r of rows) {
     if (!PROPOSAL.test(r.ai_response)) continue;
     const userLog = log.child({ user_id: r.id });
-    const sent = await templates.send('proposal_nudge', { to: r.phone_number, user: r, inWindow: true }, userLog);
+    const sent = await templates.send('proposal_nudge', {
+      to: r.phone_number, user: r, inWindow: true,
+      periodKey: r.proposed_at ? `proposal:${new Date(r.proposed_at).toISOString()}` : null,
+    }, userLog);
     if (sent.sent) result.sent += 1;
   }
   log.info('lifecycle.proposal_nudges_done', result);

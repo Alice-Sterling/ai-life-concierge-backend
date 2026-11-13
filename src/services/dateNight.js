@@ -161,7 +161,9 @@ async function sendPing(user, log) {
   const inWindow = await templates.inWindow(user.id, log);
   if (!config.templates.datenight_ping && !inWindow) return false;
 
-  const sent = await templates.send('datenight_ping', { to: user.phone_number, user, inWindow }, log);
+  // One ping per due date: a retried sweep, or a second instance, finds the lock taken.
+  const periodKey = user.next_date_due_at ? `due:${new Date(user.next_date_due_at).toISOString()}` : null;
+  const sent = await templates.send('datenight_ping', { to: user.phone_number, user, inWindow, periodKey }, log);
   if (!sent.sent || sent.via === 'inline') return false;
 
   await db.query(

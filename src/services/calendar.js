@@ -176,6 +176,7 @@ async function saveConnection(
   );
 
   log.info('calendar.connected', { user_id: userId, provider: prov, timezone_from_calendar: Boolean(timezone) });
+  await markTokenStatus(userId, 'ok', log);
   await events.record(events.EVENT.CALENDAR_CONNECTED, {
     userId, requestId, metadata: { provider: prov, timezone },
   }, log);
@@ -209,6 +210,30 @@ function oauthClient(provider) {
   const { config } = require('../config');
   const c = config.calendarOAuth?.[provider] || {};
   return c.clientId && c.clientSecret ? c : null;
+}
+
+/**
+ * Token health for the Command Center's context panel (migration 008).
+ * Best-effort: its own statement, so a refresh never fails because of it.
+ *   ok             refreshed (or connected) fine
+ *   refresh_failed the provider refused the last refresh
+ *   disconnected   the provider revoked access; the client must log in again
+ */
+async function markTokenStatus(userId, status, log = logger) {
+  try {
+    await db.query(
+      `UPDATE users
+          SET calendar_token_status = $2::varchar,
+              calendar_token_last_refreshed_at = CASE WHEN $2::varchar = 'ok' THEN NOW()
+                                                      ELSE calendar_token_last_refreshed_at END,
+              calendar_disconnected_at = CASE WHEN $2::varchar = 'disconnected' THEN NOW()
+                                              WHEN $2::varchar = 'ok' THEN NULL
+                                              ELSE calendar_disconnected_at END
+        WHERE id = $1`,
+      [userId, status], log);
+  } catch (err) {
+    log.warn('calendar.token_status_not_saved', { message: err.message, code: err.code });
+  }
 }
 
 /**
@@ -257,6 +282,7 @@ async function getAccessToken(userId, log = logger) {
     if (!res.ok || !body.access_token) {
       // invalid_grant = the client revoked access. Only then do they need to reconnect.
       log.warn('calendar.token_refresh_failed', { provider, status: res.status, error: body.error || null });
+      await markTokenStatus(userId, body.error === 'invalid_grant' ? 'disconnected' : 'refresh_failed', log);
       if (body.error === 'invalid_grant') {
         await db.query('UPDATE users SET calendar_connected = false WHERE id = $1', [userId], log);
       }
@@ -275,6 +301,7 @@ async function getAccessToken(userId, log = logger) {
         body.refresh_token ? crypto.encrypt(body.refresh_token) : null, seconds],
       log);
     log.info('calendar.token_refreshed', { provider });
+    await markTokenStatus(userId, 'ok', log);
     return { token: body.access_token, provider };
   } catch (err) {
     log.warn('calendar.token_refresh_failed', { provider, message: err.message });

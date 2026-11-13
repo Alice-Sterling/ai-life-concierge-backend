@@ -100,7 +100,12 @@ const unstubAirtable = () => { airtable.findUserRecord = realLookup; };
   check('Waitlist: not told twice in 6h', r.includes('waitlist'), false);
   const logged = await db.query('SELECT ai_response, metadata FROM conversations WHERE user_id = $1 ORDER BY timestamp', [wait.id]);
   check('both messages are in their history', logged.rows.length, 2);
-  check('the suppressed one is marked', logged.rows[1].metadata.suppressed, true);
+  // Since 1 Nov (481de33) a second message gets one short follow-up instead of
+  // silence; only the third within the window is suppressed.
+  check('the second gets the one short follow-up', logged.rows[1].metadata.gate, 'gate_followup');
+  r = await send(wait.phone_number, 'Hello a third time');
+  const third = await db.query('SELECT metadata FROM conversations WHERE user_id = $1 ORDER BY timestamp', [wait.id]);
+  check('the third is suppressed and marked', third.rows[2]?.metadata.suppressed, true);
 
   const denied = await addUser(2, 'Denied');
   r = await send(denied.phone_number, 'Hi');

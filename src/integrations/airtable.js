@@ -266,6 +266,154 @@ async function syncTask(task, userRecordId, log = logger, desk = null) {
   return id;
 }
 
+/**
+ * The Airtable tables and fields this backend reads or writes. If the desk
+ * renames or deletes one, a sync silently stops landing, so /health/airtable-schema
+ * (and a check at boot) compares the live base against this list.
+ * "optional" fields are read when present; their absence is only reported.
+ */
+function requiredSchema() {
+  return [
+    {
+      key: 'clients',
+      table: config.airtable.userTableRef,
+      required: [
+        'Client ID', config.airtable.phoneField, 'email', 'First Name', 'Last_Name', 'Status',
+        'Conversation Mode', 'Next Date Due', 'Date Night Cadence', 'ActiveAutomations',
+        'Home City', 'Work City', 'Partner Name', 'Dietary Restrictions', 'Favorite Cuisine',
+        'Stripe Status',
+      ],
+      optional: ['CalendarProvider', 'Created At'],
+    },
+    {
+      key: 'tasks',
+      table: config.airtable.tasksTableRef,
+      required: [
+        'Task ID', 'AI Summary', 'Source Message', 'Status', 'Priority', 'Category',
+        'Requires Human', config.airtable.tasksUserLinkField, 'Booking Link', 'Vendor Phone', 'Price',
+      ],
+      optional: [],
+    },
+  ];
+}
+
+async function rawGet(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${config.airtable.apiKey}` },
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body };
+  } catch (err) {
+    return { ok: false, status: 0, body: {}, error: err.name === 'AbortError' ? 'timed out' : err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Does one field exist? Asks for a single record with only that field: Airtable
+ * answers 422 UNKNOWN_FIELD_NAME for a field the table does not have.
+ * @returns {Promise<boolean|null>} null = could not tell (table missing, network)
+ */
+async function fieldExists(tableRef, field) {
+  const qs = `maxRecords=1&${encodeURIComponent('fields[]')}=${encodeURIComponent(field)}`;
+  const res = await rawGet(`${tableUrl(tableRef)}?${qs}`);
+  if (res.ok) return true;
+  if (res.status === 422 && /UNKNOWN_FIELD_NAME/i.test(JSON.stringify(res.body))) return false;
+  return null;
+}
+
+/** Compare one table against its list, given the field names the base really has. */
+function compareTable(spec, liveFields) {
+  const have = new Set(liveFields);
+  const missing = spec.required.filter((f) => !have.has(f));
+  return {
+    table: spec.table,
+    found: true,
+    missing_fields: missing,
+    missing_optional: spec.optional.filter((f) => !have.has(f)),
+    checked_fields: spec.required.length,
+    ok: missing.length === 0,
+  };
+}
+
+/**
+ * Check the live base against requiredSchema().
+ *
+ * First choice is Airtable's schema API (one call, needs the token scope
+ * schema.bases:read). Without that scope it falls back to asking for each
+ * field in turn, which any read token can do.
+ *
+ * @returns {Promise<{status: 'ok'|'error'|'not_configured', method?, tables?, problems?}>}
+ */
+async function schemaCheck(log = logger) {
+  if (!isConfigured()) return { status: 'not_configured', configured: false };
+  const specs = requiredSchema();
+  const startedAt = Date.now();
+  const tables = {};
+  let method = 'schema_api';
+
+  const meta = await rawGet(`${API_ROOT}/meta/bases/${encodeURIComponent(config.airtable.baseId)}/tables`);
+  if (meta.ok && Array.isArray(meta.body?.tables)) {
+    for (const spec of specs) {
+      const live = meta.body.tables.find((t) => t.id === spec.table || t.name === spec.table);
+      tables[spec.key] = live
+        ? compareTable(spec, (live.fields || []).map((f) => f.name))
+        : { table: spec.table, found: false, missing_fields: spec.required, missing_optional: spec.optional, checked_fields: spec.required.length, ok: false };
+    }
+  } else {
+    method = 'field_probe';
+    for (const spec of specs) {
+      const head = await rawGet(`${tableUrl(spec.table)}?maxRecords=1`);
+      if (!head.ok) {
+        tables[spec.key] = {
+          table: spec.table, found: false, ok: false, missing_fields: [], missing_optional: [],
+          checked_fields: 0, error: head.error || `HTTP ${head.status}`,
+        };
+        continue;
+      }
+      const missing = [];
+      const missingOptional = [];
+      const unknown = [];
+      for (const field of [...spec.required, ...spec.optional]) {
+        const exists = await fieldExists(spec.table, field);
+        if (exists === false) (spec.required.includes(field) ? missing : missingOptional).push(field);
+        if (exists === null) unknown.push(field);
+        await pause(220); // Airtable allows 5 requests a second per base
+      }
+      tables[spec.key] = {
+        table: spec.table, found: true, missing_fields: missing, missing_optional: missingOptional,
+        ...(unknown.length ? { could_not_check: unknown } : {}),
+        checked_fields: spec.required.length, ok: missing.length === 0 && unknown.length === 0,
+      };
+    }
+  }
+
+  const problems = Object.values(tables).flatMap((t) => [
+    ...(t.found ? [] : [`table "${t.table}" not found${t.error ? ` (${t.error})` : ''}`]),
+    ...(t.found ? t.missing_fields.map((f) => `"${t.table}" has no field "${f}"`) : []),
+    ...((t.could_not_check || []).map((f) => `could not check "${t.table}"."${f}"`)),
+  ]);
+  const result = {
+    status: problems.length ? 'error' : 'ok',
+    configured: true,
+    method,
+    duration_ms: Date.now() - startedAt,
+    tables,
+    problems,
+  };
+  log[problems.length ? 'error' : 'info']('airtable.schema_checked', {
+    integration: 'airtable', status: result.status, method, problems,
+  });
+  return result;
+}
+
 /** Connectivity probe for /health/integrations. Reads one record; writes nothing. */
 async function healthCheck() {
   if (!isConfigured()) {
@@ -303,4 +451,7 @@ async function listUserRecords(log = logger) {
 module.exports = {
   isConfigured, syncUser, syncTask, findRecord, findRecordId, findUserRecord, updateUserRecord,
   listUserRecords, phoneDigitVariants, phoneMatchFormula, healthCheck,
+  requiredSchema,
+  compareTable,
+  schemaCheck,
 };

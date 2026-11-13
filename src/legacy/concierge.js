@@ -1949,7 +1949,7 @@ async function syncTrialStartDateIfNull(user) {
 
 async function getUserByPhone(phoneNumber) {
   const result = await pool.query(
-    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, activated_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone, calendar_connected FROM users WHERE phone_number = $1',
+    'SELECT id, first_name, last_name, phone_number, email, client_id, short_id, tier, last_nudge_at, created_at, activated_at, trial_start_date, subscription_status, google_super_connected, calendar_provider, architecture_synced_at, onboarding_status, onboarding_step, active_automations, preferences, conversation_mode, onboarding_phase, onboarding_completed_at, last_date_curated_at, date_night_cadence, next_date_due_at, active_timezone, calendar_connected, conversation_mode_changed_at FROM users WHERE phone_number = $1',
     [phoneNumber]
   );
   const row = result.rows[0] || null;

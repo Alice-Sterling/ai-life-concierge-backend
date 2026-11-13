@@ -3,8 +3,11 @@
  *
  * A client handed to the desk is in 'human' mode, and Alice stays silent. If
  * nobody on the desk switches them back, they are stranded: every message is
- * queued and nobody answers. This job hands anyone back to Alice once the
- * hand-off has been quiet for HUMAN_MODE_TIMEOUT_MINUTES (default 120).
+ * queued and nobody answers. This job hands anyone back to Alice once their
+ * human window has ended: human_override_until, which is set
+ * HUMAN_MODE_TIMEOUT_MINUTES (default 120) ahead by the hand-over and by every
+ * later human action. It runs every 5 minutes (Project 4, Scenario C) and
+ * leaves a note in the chat view.
  *
  * Set HUMAN_MODE_TIMEOUT_MINUTES=0 to switch it off.
  */
@@ -34,7 +37,7 @@ function start() {
     logger.info('cron.human_mode_resume_disabled', {});
     return null;
   }
-  const schedule = process.env.HUMAN_MODE_RESUME_CRON || '*/10 * * * *';
+  const schedule = process.env.HUMAN_MODE_RESUME_CRON || '*/5 * * * *';
   logger.info('cron.human_mode_resume_started', { schedule, after_minutes: config.gate.humanModeTimeoutMinutes });
 
   let running = false;

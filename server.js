@@ -15,6 +15,7 @@ const { config, validate } = require('./src/config');
 const { logger } = require('./src/lib/logger');
 const { pool } = require('./src/db/pool');
 const legacy = require('./src/legacy/concierge');
+const airtable = require('./src/integrations/airtable');
 const nudgeJob = require('./src/jobs/nudge');
 const dateNightJob = require('./src/jobs/dateNight');
 const humanModeResumeJob = require('./src/jobs/humanModeResume');
@@ -46,6 +47,13 @@ async function main() {
     // service can still serve /health, which is how an operator finds out.
     logger.error('boot.schema_init_failed', { message: err.message });
   }
+
+  // Airtable is edited by hand. A renamed column breaks a sync without an
+  // error anyone sees, so the schema is checked once at boot and the result
+  // logged (airtable.schema_checked). It never blocks or stops the boot.
+  airtable.schemaCheck(logger).catch((err) => {
+    logger.warn('boot.airtable_schema_check_failed', { message: err.message });
+  });
 
   nudgeJob.start();
   dateNightJob.start();

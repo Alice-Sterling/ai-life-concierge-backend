@@ -34,6 +34,27 @@ const bool = (key, fallback = false) => {
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 };
 
+const list = (key) => (str(key, '') || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+/** ADMIN_TOKENS as JSON. A value that does not parse is ignored (and reported by validate()). */
+function parseAdminTokens(raw) {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((t) => t && typeof t.token === 'string' && t.token.trim().length >= 16 && t.actor)
+      .map((t) => ({
+        actor: String(t.actor).slice(0, 64),
+        token: t.token.trim(),
+        scope: t.scope === 'read' ? 'read' : 'write',
+        ips: Array.isArray(t.ips) ? t.ips.map(String) : [],
+      }));
+  } catch {
+    return [];
+  }
+}
+
 const nodeEnv = str('NODE_ENV', 'development');
 
 const config = {
@@ -134,6 +155,27 @@ const config = {
     // Guards the /admin/* endpoints. No fallback value on purpose: an admin API
     // with a default token is an admin API with no token.
     apiToken: str('ADMIN_API_TOKEN'),
+    // Named tokens with a scope, one per caller (Project 4):
+    //   ADMIN_TOKENS=[{"actor":"command-center","token":"...","scope":"write"},
+    //                 {"actor":"reporting","token":"...","scope":"read","ips":["203.0.113.7"]}]
+    // ADMIN_API_TOKEN keeps working as actor "legacy-admin" with write scope.
+    tokens: parseAdminTokens(str('ADMIN_TOKENS')),
+    // Comma-separated IPs or IPv4 CIDR ranges allowed to call /admin. Empty = any.
+    ipAllowlist: list('ADMIN_IP_ALLOWLIST'),
+    // Browser origins allowed to call /admin (the Command Center). Empty = none.
+    corsOrigins: list('ADMIN_CORS_ORIGINS'),
+    // Where "a client wrote while with a human" alerts go.
+    alertEmail: str('HUMAN_MODE_ALERT_EMAIL', 'assist@ailifeconcierge.co.uk'),
+    slackWebhookUrl: str('SLACK_WEBHOOK_URL'),
+  },
+
+  // Voice notes -> text (src/integrations/transcription.js). Groq is used when
+  // its key is set, else OpenAI. No key: voice notes behave as before.
+  transcription: {
+    enabled: bool('VOICE_NOTES_ENABLED', true),
+    provider: str('TRANSCRIPTION_PROVIDER'),
+    model: str('TRANSCRIPTION_MODEL'),
+    keys: { groq: str('GROQ_API_KEY'), openai: str('OPENAI_API_KEY') },
   },
 
   cron: { nudgeSchedule: str('NUDGE_CRON_SCHEDULE') },
@@ -229,6 +271,7 @@ const config = {
   security: {
     rateLimitWindowMs: int('RATE_LIMIT_WINDOW_MS', 60_000),
     rateLimitMax: int('RATE_LIMIT_MAX', 120),
+    adminRateLimitMax: int('ADMIN_RATE_LIMIT_MAX', 120),
     // Twilio signs every webhook. Verification is mandatory in production and
     // optional locally, where requests come from a test script with no signature.
     verifyTwilioSignature: bool('VERIFY_TWILIO_SIGNATURE', nodeEnv === 'production'),

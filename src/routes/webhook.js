@@ -30,6 +30,9 @@ const gateway = require('../services/gateway');
 const handoff = require('../services/handoff');
 const users = require('../services/users');
 const proactiveReplies = require('../services/proactiveReplies');
+const messages = require('../services/messages');
+const deskAlerts = require('../services/deskAlerts');
+const transcription = require('../integrations/transcription');
 const legacy = require('../legacy/concierge');
 
 const router = express.Router();
@@ -41,6 +44,13 @@ const HUMAN_MODE_ACK =
   'Thank you. Your request is with your concierge and someone will be in touch shortly.';
 
 const FALLBACK_REPLY = 'I have received your message. One moment while I prepare a reply.';
+
+/** Sent when a voice note arrived but could not be turned into text. */
+const VOICE_FAILED_REPLY =
+  'Thank you for the voice note. I was not able to listen to it just now. Could you type that for me?';
+
+/** If the mode-change time is unknown, "already acknowledged" looks back this far. */
+const HUMAN_ACK_LOOKBACK_MS = 2 * 3600e3;
 
 /** How long after the trial nudge a bare "yes" still answers it. */
 const TRIAL_NUDGE_ANSWER_HOURS = 48;
@@ -239,7 +249,7 @@ router.post('/webhook', async (req, res) => {
   const log = req.log;
   const phoneNumber = req.body.From;
   const profileName = req.body.ProfileName || req.body.profileName || null;
-  const incomingText = String(req.body.Body || '').trim();
+  let incomingText = String(req.body.Body || '').trim();
 
   // --- 1. Signature --------------------------------------------------------
   if (config.security.verifyTwilioSignature) {
@@ -314,6 +324,41 @@ router.post('/webhook', async (req, res) => {
       body_length: incomingText.length,
     });
 
+    // --- 2a. Voice notes and the message log --------------------------------
+    // A voice note becomes text here, before anything reads the message, so
+    // the front door, the desk and Alice all see the same words.
+    const hasAudio = transcription.audioMedia(req.body).length > 0;
+    let voiceFailed = false;
+    if (hasAudio && transcription.isConfigured()) {
+      const transcript = await transcription.transcribeWebhookAudio(req.body, userLog);
+      if (transcript) {
+        incomingText = [incomingText, `${messages.AUDIO_PREFIX} ${transcript}`].filter(Boolean).join('\n');
+        userLog.info('webhook.voice_note_transcribed', { chars: transcript.length });
+      } else {
+        voiceFailed = true;
+        userLog.warn('webhook.voice_note_not_transcribed', {});
+      }
+    }
+
+    // Every inbound message goes to the chat log (the Command Center), whatever
+    // happens to it next. A Twilio retry carries the same sid and is not logged twice.
+    await messages.inbound(
+      user.id,
+      incomingText || (hasAudio ? messages.VOICE_PLACEHOLDER : transcription.hasMedia(req.body) ? messages.MEDIA_PLACEHOLDER : ''),
+      {
+        twilio_sid: req.body.MessageSid || req.body.SmsMessageSid || undefined,
+        request_id: req.requestId,
+        ...(transcription.hasMedia(req.body) ? { media: Number.parseInt(req.body.NumMedia, 10) || 0 } : {}),
+        ...(hasAudio ? { voice_note: voiceFailed ? 'failed' : (transcription.isConfigured() ? 'transcribed' : 'not_configured') } : {}),
+      }, userLog);
+
+    /** Reply in the webhook response, and put the reply in the chat log. */
+    const sendTwiml = async (text, flags = {}) => {
+      await messages.outbound(user.id, text, { metadata: { via: 'twiml', request_id: req.requestId, ...flags } }, userLog);
+      res.type('text/xml');
+      return res.send(legacy.twimlMessage(text));
+    };
+
     // --- 2b. Front door ---------------------------------------------------
     // Status routing before anything else: only Active members reach Alice.
     // Before the human gate, so an Inactive member in human mode is still
@@ -324,6 +369,11 @@ router.post('/webhook', async (req, res) => {
       }, userLog);
       if (outcome.halt) {
         userLog.info('webhook.stopped_at_front_door', { onboarding_phase: user.onboarding_phase });
+        // 'inline' = the reply travels in this response, not through the
+        // Twilio API, so the sender did not log it.
+        if (outcome.reply?.via === 'inline' && outcome.reply.text) {
+          await messages.outbound(user.id, outcome.reply.text, { metadata: { via: 'twiml', gate: true } }, userLog);
+        }
         return respondGate(outcome.reply);
       }
       user = outcome.user;
@@ -346,9 +396,30 @@ router.post('/webhook', async (req, res) => {
         requestId: req.requestId,
       }, userLog);
 
-      userLog.info('webhook.queued_for_human', {});
-      res.type('text/xml');
-      return res.send(legacy.twimlMessage(HUMAN_MODE_ACK));
+      // Somebody on the desk has to know a message is waiting (email, and
+      // Slack when configured). One alert per client per ten minutes.
+      await deskAlerts.clientWaiting(user, incomingText, { requestId: req.requestId }, userLog);
+
+      // The "someone will be in touch" line goes out once per hand-over, not
+      // after every message: a client chatting with a human should not get
+      // the same canned sentence between each reply.
+      const since = user.conversation_mode_changed_at
+        || new Date(Date.now() - HUMAN_ACK_LOOKBACK_MS).toISOString();
+      const acknowledged = await messages.sentSince(user.id, 'human_ack', since, userLog);
+
+      userLog.info('webhook.queued_for_human', { acknowledged_before: acknowledged });
+      if (acknowledged) {
+        res.type('text/xml');
+        return res.send('<Response></Response>');
+      }
+      return sendTwiml(HUMAN_MODE_ACK, { human_ack: true });
+    }
+
+    // A voice note with no usable text: say so, rather than send Alice an
+    // empty message. Only when transcription is switched on and failed.
+    if (voiceFailed && !incomingText) {
+      await conversations.save(user.id, messages.VOICE_PLACEHOLDER, VOICE_FAILED_REPLY, { voice_note: 'failed' }, userLog);
+      return sendTwiml(VOICE_FAILED_REPLY, { voice_note: 'failed' });
     }
 
     // --- 4. Batching -------------------------------------------------------
@@ -389,8 +460,7 @@ router.post('/webhook', async (req, res) => {
       phoneNumber, profileName, requestId: req.requestId, log: userLog,
     });
 
-    res.type('text/xml');
-    return res.send(legacy.twimlMessage(replyBody));
+    return sendTwiml(replyBody);
   } catch (err) {
     log.error('webhook.failed', { message: err.message, stack: err.stack });
     // For the alarm email (src/services/alarms.js). Best-effort: when the
@@ -412,3 +482,5 @@ router.post('/webhook', async (req, res) => {
 module.exports = router;
 module.exports.runConversationFlow = runConversationFlow;
 module.exports.isTrialNudgeAnswer = isTrialNudgeAnswer;
+module.exports.VOICE_FAILED_REPLY = VOICE_FAILED_REPLY;
+module.exports.HUMAN_MODE_ACK = HUMAN_MODE_ACK;
