@@ -82,6 +82,10 @@ config.gate.paymentUrl = savedPay;
 check('follow-up for Waitlist', /Founding Member list/.test(templates.TEMPLATES.gate_followup.text(sarah, { status: 'Waitlist' })), true);
 check('follow-up is plain text (no template SID)', [templates.TEMPLATES.gate_followup.name, config.templates.gate_followup], [null, undefined]);
 
+console.log('\nALICE DOES NOT TALK ABOUT HER TOOLS (15 Nov)');
+check('the tools block tells her so',
+  /Never mention a tool, a search, a system or a database to the client/.test(agentTools.promptBlock('5c8e76ca-60b1-4c2a-8bb7-7e5bf240e16f')), true);
+
 console.log('\nAIRTABLE -> BACKEND (11 Nov)');
 const atSync = require('../src/services/airtableSync');
 check('website automation labels -> backend slugs (Jonny\'s real row)', atSync.automationSlugs(
