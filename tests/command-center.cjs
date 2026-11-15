@@ -579,6 +579,32 @@ const settle = () => new Promise((r) => setTimeout(r, 150));
   check('an Anthropic outage in the background is swallowed', true, true);
   config.memory.enabled = false;
 
+  // ------------------------------------------------------------------ calendar tokens
+  console.log('\nCALENDAR TOKEN DELETION');
+  const cal = await addUser('Active', { first: 'Cal' });
+  await db.query(
+    `UPDATE users SET calendar_access_token_enc = '\\x01aa'::bytea, calendar_refresh_token_enc = '\\x01bb'::bytea,
+            calendar_token_expires_at = NOW() + INTERVAL '1 hour', calendar_token_scope = 'calendar.readonly',
+            calendar_connected = true, calendar_provider = 'google', calendar_token_status = 'ok' WHERE id = $1`, [cal.id]);
+  r = await post(`/admin/users/${cal.id}/calendar/disconnect`, {}, READ);
+  check('a read-only token cannot delete tokens', r.status, 403);
+  r = await post(`/admin/users/${cal.id}/calendar/disconnect`, {}, { ...CC, 'X-Admin-Actor': 'alice@example.com' });
+  check('disconnect -> 200', [r.status, r.body.ok, r.body.calendar_connected, r.body.had_tokens], [200, true, false, true]);
+  const afterCal = await userRow(cal.id);
+  check('both tokens, the expiry and the scope are gone',
+    [afterCal.calendar_access_token_enc, afterCal.calendar_refresh_token_enc, afterCal.calendar_token_expires_at, afterCal.calendar_token_scope],
+    [null, null, null, null]);
+  check('marked disconnected, with the time', [afterCal.calendar_connected, afterCal.calendar_token_status, Boolean(afterCal.calendar_disconnected_at)], [false, 'disconnected', true]);
+  check('no usable token is handed out afterwards', await require('../src/services/calendar').getAccessToken(cal.id), null);
+  r = await post(`/admin/users/${cal.id}/calendar/disconnect`, {});
+  check('doing it again is harmless', [r.status, r.body.had_tokens], [200, false]);
+  check('unknown client -> 404', (await post('/admin/users/00000000-0000-4000-8000-000000000000/calendar/disconnect', {})).status, 404);
+  await settle();
+  const calAudit = (await db.query(`SELECT actor, user_id FROM admin_audit_logs WHERE action = 'calendar.disconnect' AND status_code = 200 ORDER BY id LIMIT 1`)).rows[0];
+  check('the deletion is in the audit trail, with who did it', [calAudit?.actor, calAudit?.user_id], ['command-center:alice@example.com', cal.id]);
+  r = await call(`/admin/users/${cal.id}/context`, { headers: READ });
+  check('the context panel shows it', [r.body.calendar.connected, r.body.calendar.token_status], [false, 'disconnected']);
+
   // ------------------------------------------------------------------ health
   console.log('\nHEALTH');
   r = await call('/health/airtable-schema');

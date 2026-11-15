@@ -101,4 +101,12 @@ check('ordinary reply untouched', historyManager.stripTranscriptPrefix('Good eve
 check('reply that only mentions Alice untouched', historyManager.stripTranscriptPrefix('Alice here. Your table is held.'), 'Alice here. Your table is held.');
 check('runtime block tells the model not to write the label', /Never write such a label/.test(toolOrchestrator.toolRuntimeBlock({ activeTimezone: 'Europe/London' })), true);
 
+console.log('\nCAPABILITY BOUNDARY (docs/capability-matrix.md)');
+const cap = promptBuilder.capabilityBlock();
+check('names the hand-off tool that really exists', /handoff_to_concierge/.test(cap) && require('../../src/services/handoff').HANDOFF_TOOL.name === 'handoff_to_concierge', true);
+check('says Alice does not book or pay', /no booking, payment, ticket purchase or car booking/.test(cap), true);
+check('says "booked" only after the team confirmed', /only when this conversation shows the team confirmed it/.test(cap), true);
+check('membership and refunds go to the team', /cancelling or pausing a membership, refunds/.test(cap), true);
+check('short enough to sit in every prompt', cap.length < 1000, true);
+
 console.log(`\n${passed} passed, 0 failed`);

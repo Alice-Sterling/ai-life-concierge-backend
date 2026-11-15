@@ -1,7 +1,7 @@
 # Command Center API (Project 4)
 
 What the Lovable Command Center calls. Everything here is built and tested
-(`node tests/command-center.cjs`, 123 checks). Base URL in production:
+(`node tests/command-center.cjs`). Base URL in production:
 `https://ai-life-concierge-backend-production.up.railway.app`.
 
 ## Before it works in production
@@ -18,6 +18,7 @@ What the Lovable Command Center calls. Everything here is built and tested
 | `GROQ_API_KEY` or `OPENAI_API_KEY` | Switches voice-note transcription on. Groq wins if both are set. | off |
 | `VOICE_NOTES_ENABLED` | `false` switches transcription off even with a key. | `true` |
 | `ADMIN_RATE_LIMIT_MAX` | Admin calls per minute per address (was fixed at 30). | `120` |
+| `MEMORY_SUMMARY_ENABLED` | `true` = Alice's long-term memory is written after replies (one Anthropic call per refresh). Reading a stored memory is always on. | `false` |
 | `HUMAN_MODE_TIMEOUT_MINUTES` | Length of the human window. `0` = never auto-resume. | `120` |
 | `HUMAN_MODE_ALERT_EMAIL` | Where "a client wrote while with a human" goes. | `assist@ailifeconcierge.co.uk` |
 | `SLACK_WEBHOOK_URL` | Also post that alert to Slack (name only, no message text). | off |
@@ -99,6 +100,8 @@ Template messages appear as their readable text, with `metadata.template_key`.
                                  "contact_email": null, "formatted_address": null, "price": "£75" } } ] }
 ```
 
+- `memory`: Alice's long-term memory of the client, `{ summary_text, key_facts, last_updated_at }`, or
+  `null` until one has been written (`MEMORY_SUMMARY_ENABLED`).
 - `recent_tasks`: the three latest, read from Postgres (the same tasks the backend mirrors to Airtable).
   The per-message "queued while in human mode" tasks are left out.
 - `links` are read from the task summary lines `Booking link:`, `Vendor phone:`, `Price:`,
@@ -123,6 +126,11 @@ Sends through Twilio, logs the message as `human_agent`, puts the client in huma
 | 409 | `duplicate_send` | The same text to the same client within 10 seconds (a double click). |
 | 502 | `twilio_send_failed` | Twilio refused it. A system note says so in the chat. |
 | 503 | `twilio_not_configured` | |
+
+### `POST /admin/users/:userId/calendar/disconnect`
+Deletes the client's stored calendar tokens (a disconnect request, a cancellation, a suspected leak).
+Answer `{ "ok": true, "calendar_connected": false, "had_tokens": true }`. Safe to repeat. Details:
+`security/calendar-tokens.md`.
 
 ### `GET /admin/audit`
 `?limit=`, `?user_id=`, `?actor=`. Who called what: `actor`, `route`, `user_id`, `action`,

@@ -65,7 +65,26 @@ function buildTimeAnchor({ activeTimezone = 'Europe/London', now = new Date() } 
   };
 }
 
+/**
+ * The line between Alice and the human desk (docs/capability-matrix.md).
+ *
+ * The brief: "Alice must never promise a capability that the backend cannot
+ * fulfil." Her tools search, check and draft; nothing in this backend books,
+ * pays, emails a venue or writes to a calendar. Without this said plainly, a
+ * helpful model tells the client "that's booked" the moment they pick an
+ * option. One short block, in every prompt.
+ */
+function capabilityBlock() {
+  return `
+### WHAT YOU DO AND WHAT THE TEAM DOES
+You search, check, propose and hand over. You do not complete anything that costs money or commits the client: you make no booking, payment, ticket purchase or car booking, you send no email to a venue, and you add nothing to a calendar. When the client chooses, the concierge team does it: call handoff_to_concierge, then say the team is arranging it and will confirm here.
+Say that something is booked, paid, sent, reserved or in the calendar only when this conversation shows the team confirmed it.
+For anything none of your tools covers (cancelling or pausing a membership, refunds, billing, tracking a flight), do not improvise an answer: say the team will take care of it, and hand over.
+`;
+}
+
 module.exports = {
+  capabilityBlock,
   PROMPT_MARKER_RE,
   cleanPromptText,
   compactOneLine,

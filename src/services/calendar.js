@@ -413,7 +413,45 @@ async function readEvents(userId, startTime, endTime, log = logger, opts = {}) {
   };
 }
 
+/**
+ * Delete a client's stored calendar tokens.
+ *
+ * For a client who asks to be disconnected, a cancellation, or a suspected
+ * leak. Both tokens, the expiry and the scope are removed, so nothing here
+ * can read the calendar again until the client logs in afresh. The grant on
+ * Google's or Microsoft's side is the client's to remove in their own account
+ * ("Third-party access" / "Apps and services"); this backend cannot do that
+ * for Microsoft and does not hold the scope for Google.
+ *
+ * @returns {Promise<{user_id, calendar_connected, had_tokens}|null>} null = no such user
+ */
+async function disconnect(userId, { requestId = null, actor = null } = {}, log = logger) {
+  const { rows } = await db.query(
+    `WITH old AS (
+       SELECT (calendar_access_token_enc IS NOT NULL OR calendar_refresh_token_enc IS NOT NULL) AS had_tokens
+         FROM users WHERE id = $1)
+     UPDATE users
+        SET calendar_access_token_enc  = NULL,
+            calendar_refresh_token_enc = NULL,
+            calendar_token_expires_at  = NULL,
+            calendar_token_scope       = NULL,
+            calendar_token_updated_at  = NOW(),
+            calendar_connected         = false
+       FROM old
+      WHERE id = $1
+      RETURNING id, calendar_connected, old.had_tokens`,
+    [userId], log);
+  if (!rows[0]) return null;
+
+  await markTokenStatus(userId, 'disconnected', log);
+  log.info('calendar.disconnected', { user_id: userId, had_tokens: rows[0].had_tokens, actor });
+  await events.record('calendar_disconnected', {
+    userId, requestId, metadata: { actor, had_tokens: rows[0].had_tokens },
+  }, log);
+  return { user_id: rows[0].id, calendar_connected: rows[0].calendar_connected, had_tokens: rows[0].had_tokens };
+}
+
 module.exports = {
-  PROVIDERS, normaliseProvider, toIana, fetchTimezone, saveConnection, getAccessToken, readEvents,
+  PROVIDERS, normaliseProvider, toIana, fetchTimezone, saveConnection, disconnect, getAccessToken, readEvents,
   mapGoogleEvent, mapOutlookEvent,
 };

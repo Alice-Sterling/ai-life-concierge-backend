@@ -10,6 +10,7 @@
  *   POST /admin/messages/send          a human writes to a client; sets human mode
  *   GET  /admin/audit                  who called what (admin_audit_logs)
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
+ *   POST /admin/users/:userId/calendar/disconnect  delete a client's stored calendar tokens
  *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
  *   GET  /admin/alarms                 what failed recently, with a likely fix (read by the n8n alarm)
  *   POST /admin/test/:userId/date-night-due  make a test user's date night due now
@@ -296,6 +297,22 @@ router.post('/calendar/connect', wrap(async (req, res) => {
     return res.status(404).json({ error: 'No user with that client_id', request_id: req.requestId });
   }
 
+  res.json({ ok: true, ...result, request_id: req.requestId });
+}));
+
+/**
+ * Delete a client's stored calendar tokens (a disconnect request, a
+ * cancellation, a suspected leak). Alice then treats the calendar as not
+ * connected until the client logs in again.
+ */
+router.post('/users/:userId/calendar/disconnect', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!UUID.test(userId)) {
+    return res.status(400).json({ error: 'userId must be a UUID', request_id: req.requestId });
+  }
+  const result = await calendar.disconnect(
+    userId, { requestId: req.requestId, actor: req.admin?.actor || 'admin' }, req.log);
+  if (!result) return res.status(404).json({ error: 'User not found', request_id: req.requestId });
   res.json({ ok: true, ...result, request_id: req.requestId });
 }));
 

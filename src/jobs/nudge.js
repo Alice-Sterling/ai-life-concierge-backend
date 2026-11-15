@@ -18,10 +18,13 @@ const SOVEREIGN_NUDGE_MESSAGE = `Architect here. I've been monitoring your reque
 /** Register the schedule. Called once from server.js. */
 function start() {
   // The "30-day Pro Vault trial" offer predates the six-month Founding Member
-  // trial and contradicts it. On by default so a deploy changes nothing;
-  // LEGACY_TRIAL_NUDGE_ENABLED=false turns it off.
-  if (process.env.LEGACY_TRIAL_NUDGE_ENABLED === 'false') {
-    logger.info('cron.nudge_disabled', { reason: 'LEGACY_TRIAL_NUDGE_ENABLED=false' });
+  // trial and contradicts it, so it was switched off on 20 Oct with
+  // LEGACY_TRIAL_NUDGE_ENABLED=false. On 15 Nov that variable was no longer
+  // in Railway, which had quietly switched the offer back on. A message that
+  // contradicts the membership must not depend on a variable staying in
+  // place: it is now off unless LEGACY_TRIAL_NUDGE_ENABLED=true asks for it.
+  if (process.env.LEGACY_TRIAL_NUDGE_ENABLED !== 'true') {
+    logger.info('cron.nudge_disabled', { reason: 'LEGACY_TRIAL_NUDGE_ENABLED is not true' });
     return null;
   }
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_WHATSAPP_FROM) {

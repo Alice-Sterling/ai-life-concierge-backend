@@ -40,6 +40,7 @@ const ACTIONS = [
   ['POST', /^\/users\/status-changed$/, 'status.changed'],
   ['POST', /^\/tasks\/[^/]+\/status$/, 'task.status.set'],
   ['POST', /^\/calendar\/connect$/, 'calendar.connect'],
+  ['POST', /^\/users\/[^/]+\/calendar\/disconnect$/, 'calendar.disconnect'],
   ['POST', /^\/test\//, 'test.run'],
   ['GET', /^\/conversations\/[^/]+$/, 'conversation.read'],
   ['GET', /^\/users\/[^/]+\/context$/, 'context.read'],
