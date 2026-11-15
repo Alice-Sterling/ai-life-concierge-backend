@@ -12,6 +12,8 @@ const { config } = require('../config');
 const lifecycle = require('../services/lifecycle');
 const proactiveFlows = require('../services/proactiveFlows');
 const airtableSync = require('../services/airtableSync');
+const membership = require('../services/membership');
+const feedback = require('../services/feedback');
 const { logger } = require('../lib/logger');
 
 /** One pass. Exported so tests and the admin can run it on demand. */
@@ -26,12 +28,18 @@ async function runOnce(log = logger) {
     ['milestone_pings', config.lifecycle.milestonePing, proactiveFlows.runMilestonePings],
     ['transit_pings', config.lifecycle.transitPing, proactiveFlows.runTransitPings],
     ['travel_pings', config.lifecycle.travelPing, proactiveFlows.runTravelPings],
+    // Project 4. A pause that has run out is ended whatever the switch says:
+    // a client must never stay paused because a feature was switched off.
+    ['membership_resume', true, membership.runAutoResume],
+    ['feedback_requests', config.feedback.enabled, feedback.runRequests],
   ];
   const results = {};
   for (const [name, enabled, run] of parts) {
     if (!enabled) continue;
     try {
-      results[name] = await run(log);
+      const out = await run(log);
+      // A part with nothing to report (no pause has run out) stays out of the result.
+      if (out !== undefined) results[name] = out;
     } catch (err) {
       // One part failing must not stop the others.
       log.error(`cron.lifecycle_${name}_failed`, { message: err.message });

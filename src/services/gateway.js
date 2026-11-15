@@ -242,6 +242,18 @@ async function admit(user, { phoneNumber, incomingText = '', requestId = null } 
     return { halt: false, user };
   }
 
+  // A member who paused in WhatsApp: RESUME switches them back on; anything
+  // else gets one short reminder of how to come back (src/services/membership.js).
+  if (status === 'Inactive') {
+    const paused = await require('./membership').handlePausedMessage(user, incomingText, { requestId }, log);
+    if (paused) {
+      const reply = await replyText(to, paused.text, log);
+      await conversations.save(user.id, incomingText, paused.text, { gate: paused.resumed ? 'membership_resumed' : 'membership_paused' }, log);
+      log.info('gate.paused_member', { resumed: paused.resumed });
+      return { halt: true, reply };
+    }
+  }
+
   if (status === 'Inactive' && HELP_REQUEST.test(incomingText)) {
     await tasks.create({
       userId: user.id,

@@ -179,6 +179,26 @@ const config = {
     minNewMessages: int('MEMORY_SUMMARY_MIN_MESSAGES', 6),
   },
 
+  // Cancel, pause and the retention gift inside WhatsApp
+  // (src/services/membership.js). These change real billing, so they are off
+  // until switched on; the test accounts always have them.
+  membership: {
+    enabled: bool('MEMBERSHIP_TOOLS_ENABLED', false),
+    // A 100%-off, one-month Stripe coupon, used for a client who is past the
+    // trial. Inside the trial no coupon is needed: the trial is extended.
+    freeMonthCouponId: str('STRIPE_FREE_MONTH_COUPON_ID'),
+    // How long after the three options were offered a choice still counts.
+    offerValidHours: int('RETENTION_OFFER_VALID_HOURS', 48),
+  },
+
+  // The day-14 "send me a voice note" request (src/services/feedback.js).
+  feedback: {
+    enabled: bool('FEEDBACK_REQUEST_ENABLED', false),
+    afterDays: int('FEEDBACK_REQUEST_AFTER_DAYS', 14),
+    // A voice note this many days after the request is stored as feedback.
+    listenDays: int('FEEDBACK_LISTEN_DAYS', 7),
+  },
+
   // Voice notes -> text (src/integrations/transcription.js). Groq is used when
   // its key is set, else OpenAI. No key: voice notes behave as before.
   transcription: {
@@ -229,6 +249,8 @@ const config = {
     transit_ping: str('TWILIO_TPL_TRANSIT_PING', 'HX4585f83226549166e9c89c4e73a9630d'),
     // Flow 6: ailc_travel_ping_v1, approved but with a stray quote and a "Ready' to review" button.
     travel_ping: str('TWILIO_TPL_TRAVEL_PING', 'HX002ae25165dcb9984ee5c148f5d356a4'),
+    // Project 4: the day-14 feedback request. No approved template yet.
+    feedback_request: str('TWILIO_TPL_FEEDBACK_REQUEST'),
   },
 
   // Proactive messages. Each one is off until its template is approved and

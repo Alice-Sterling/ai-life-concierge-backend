@@ -351,6 +351,7 @@ module.exports = {
   ONBOARDING_PHASES,
   normalizePhase,
   claimWelcome,
+  pushToAirtable,
   modeNote,
   setHumanOverride,
   extendHumanOverride,

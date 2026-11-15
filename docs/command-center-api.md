@@ -6,7 +6,7 @@ What the Lovable Command Center calls. Everything here is built and tested
 
 ## Before it works in production
 
-1. Apply `db/sql/008_command_center.sql` to the production database (additive, safe to run twice).
+1. Apply `db/sql/008_command_center.sql`, then `db/sql/009_membership_and_feedback.sql`, to the production database (both additive, safe to run twice).
 2. Railway variables (all optional except the token you give the dashboard):
 
 | Variable | What it does | Default |
@@ -131,6 +131,10 @@ Sends through Twilio, logs the message as `human_agent`, puts the client in huma
 Deletes the client's stored calendar tokens (a disconnect request, a cancellation, a suspected leak).
 Answer `{ "ok": true, "calendar_connected": false, "had_tokens": true }`. Safe to repeat. Details:
 `security/calendar-tokens.md`.
+
+### `GET /admin/feedback`
+`?limit=`, `?user_id=`. What clients said in their feedback voice notes, newest first:
+`{ id, user_id, first_name, last_name, source, content, created_at }`. Needs migration 009.
 
 ### `GET /admin/audit`
 `?limit=`, `?user_id=`, `?actor=`. Who called what: `actor`, `route`, `user_id`, `action`,

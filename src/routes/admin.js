@@ -34,6 +34,8 @@ const alarms = require('../services/alarms');
 const messages = require('../services/messages');
 const commandCenter = require('../services/commandCenter');
 const memory = require('../agents/memory');
+const feedback = require('../services/feedback');
+const membership = require('../services/membership');
 const adminAudit = require('../middleware/adminAudit');
 const db = require('../db/pool');
 const { config } = require('../config');
@@ -172,6 +174,16 @@ router.post('/messages/send', wrap(async (req, res) => {
     if (!err.expose) throw err;
     res.status(err.status).json({ ok: false, error: err.message, code: err.code, request_id: req.requestId });
   }
+}));
+
+/** What clients said in their feedback voice notes, newest first. Optional ?user_id=. */
+router.get('/feedback', wrap(async (req, res) => {
+  const userId = req.query.user_id || null;
+  if (userId && !UUID.test(userId)) {
+    return res.status(400).json({ error: 'user_id must be a UUID', request_id: req.requestId });
+  }
+  const rows = await feedback.list({ limit: req.query.limit, userId }, req.log);
+  res.json({ count: rows.length, feedback: rows, request_id: req.requestId });
 }));
 
 /** The audit trail, newest first. Optional ?user_id= and ?actor=. */
@@ -368,6 +380,10 @@ const TEST_JOBS = {
   // Long-term memory: summarise now whatever has left Alice's recent window,
   // even a few messages, and whatever MEMORY_SUMMARY_ENABLED says. Sends nothing.
   memory: (log, opts) => memory.refresh(opts.userId, { force: true }, log),
+  // Project 4: the day-14 feedback request, now (ignore_wait skips the 14 days).
+  feedback_request: (log, opts) => feedback.runRequests(log, { userId: opts.userId, ignoreWait: opts.ignoreWait }),
+  // End every pause that has run out. Sends nothing to clients.
+  membership_resume: (log) => membership.runAutoResume(log),
 };
 
 function testUser(req, res) {
@@ -411,7 +427,7 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
   const userId = testUser(req, res);
   if (!userId) return;
   // "memory" only runs when asked for by name: it calls the Anthropic API.
-  const jobs = req.body?.jobs ?? Object.keys(TEST_JOBS).filter((j) => j !== 'memory');
+  const jobs = req.body?.jobs ?? Object.keys(TEST_JOBS).filter((j) => !['memory', 'feedback_request', 'membership_resume'].includes(j));
   const unknown = [].concat(jobs).filter((j) => !TEST_JOBS[j]);
   if (unknown.length) {
     return res.status(400).json({
@@ -441,6 +457,8 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
       travel_ping: config.lifecycle.travelPing,
       agent_tools: config.agentTools.enabled,
       memory_summary: config.memory.enabled,
+      membership_tools: config.membership.enabled,
+      feedback_request: config.feedback.enabled,
     },
     results,
     request_id: req.requestId,

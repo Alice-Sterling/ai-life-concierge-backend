@@ -30,7 +30,10 @@ disagree, the code is right and this page needs fixing.
 | **A voice note** *(Project 4, needs a key)* | Turns it into text and answers it like a typed message. If she cannot, asks the client to type. | Sees the transcript in the chat view. | `src/integrations/transcription.js` |
 | **Remembering the client** *(Project 4, off until switched on)* | Keeps a short summary and key facts from older conversations. | Sees them in the context panel. | `src/agents/memory.js` |
 | **Any booking, payment, purchase or reservation** | **Never.** Hands over the moment the client chooses. | **Always.** | `handoff_to_concierge` |
-| **Cancel, pause or change the membership; refunds; billing** | **Cannot today.** Says the team will take care of it and hands over. | Handles it in Stripe and Airtable. | Not built. Planned in Project 4 (`apply_free_month`, `pause_membership`, `cancel_membership`). |
+| **Cancel or pause the membership** *(Project 4, off until `MEMBERSHIP_TOOLS_ENABLED`)* | With the switch **off** (today): cannot; says the team will take care of it and hands over. With it **on**: offers the three options first (a free month, a 30 or 60-day pause, cancelling now), then does what the client picks and says exactly what was done. | Gets a task for every change. If Stripe could not be changed, the task says so in capitals and the desk does the billing by hand; Alice then tells the client the team will confirm the billing. | `retention_offer`, `apply_free_month`, `pause_membership`, `cancel_membership` (`src/services/membership.js`). The code refuses the last three unless the offer was made in the last 48 hours. |
+| **Come back from a pause** | Not Alice: a paused member who writes RESUME (or "reactivate", "I'm back") is switched back on by the front door and welcomed back. Any other message gets one line saying how to come back. The pause also ends by itself on its date. | Gets a task when a client comes back. | `membership.handlePausedMessage`, `membership.runAutoResume` |
+| **Refunds, billing questions, changing the plan** | **Cannot.** Says the team will take care of it and hands over. | Handles it in Stripe. | No tool. |
+| **Feedback** *(Project 4, off until `FEEDBACK_REQUEST_ENABLED`)* | Asks once, 14 days after activation, for a voice note. Thanks the client when it comes. | Reads the transcript (email, the Tasks board, `GET /admin/feedback`). | `src/services/feedback.js` |
 | **Flight delays and gate changes** | **Cannot.** She only notices a flight in the calendar and offers transport. | — | Not built (`monitor_linked_event` is in the brief, no flight feed yet). |
 | **Email or call a venue, a shop or anybody else** | **Cannot.** | Does it. | No sending tool exists. `execute_action` (email through Composio) is in the code but is never offered in production: no `COMPOSIO_API_KEY`. |
 | **Search the open web** | **Not in production.** She uses her tools and the Black Book. | — | Web search needs `TAVILY_API_KEY`, which is not set. |
@@ -59,7 +62,8 @@ client back.
 | "I've added it to your calendar" | never: she cannot |
 | "I've emailed the restaurant" | never: she cannot |
 | "It will arrive on Tuesday" | a tool returned that delivery date, and she says the team confirms at checkout |
-| "Your membership is cancelled / paused" | never today: the desk does it |
+| "Your membership is cancelled / paused" | one of her membership tools returned those words in this conversation |
+| "Your Stripe subscription has been cancelled" | the cancel tool said Stripe was changed; otherwise she says the team will confirm the billing |
 | A venue, time, price or link | a tool returned it in this conversation |
 
 ## Keeping this page true

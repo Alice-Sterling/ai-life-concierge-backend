@@ -62,6 +62,10 @@ lock, so a job that runs twice cannot send twice (`proactive_send_locks`, after 
 | `MEMORY_SUMMARY_ENABLED` | `false` | After a reply, messages that have left Alice's recent window are folded into the client's long-term memory (one Anthropic call per refresh). | Existing memories are still read; no new ones are written. To stop reading too, delete the row in `user_memory_summaries`. |
 | `MEMORY_SUMMARY_MODEL` | `claude-sonnet-4-6` | The model that writes the memory. | — |
 | `MEMORY_SUMMARY_MIN_MESSAGES` | `6` | Messages that must have aged out before a refresh. | — |
+| `MEMBERSHIP_TOOLS_ENABLED` | `false` | Alice can apply the free month, pause (30 or 60 days) and cancel a membership in WhatsApp, after offering all three. **Changes real billing in Stripe.** Needs migration 009 and a Stripe key that may change subscriptions. | Membership requests go to the desk, as today. A pause that is already running still ends on its date. |
+| `STRIPE_FREE_MONTH_COUPON_ID` | none | The 100%-off one-month coupon used for a client who is past the trial. Inside the trial none is needed (the trial is extended by 30 days). | Past the trial, the free month goes to the desk to apply by hand. |
+| `RETENTION_OFFER_VALID_HOURS` | `48` | How long after the three options were offered the client's choice still counts. | — |
+| `FEEDBACK_REQUEST_ENABLED` | `false` | 14 days after activation Alice asks once for a voice note of feedback (`FEEDBACK_REQUEST_AFTER_DAYS`). A voice note in the following 7 days (`FEEDBACK_LISTEN_DAYS`) is stored in `client_feedback` and the team is told. Needs `TWILIO_TPL_FEEDBACK_REQUEST` to reach a client who has not written in 24 hours. | No request is sent. Voice notes are ordinary messages. |
 | `OPENAI_API_KEY` / `GROQ_API_KEY` | none | Voice notes are transcribed (Groq wins if both are set). | No key = voice notes behave as before. |
 | `VOICE_NOTES_ENABLED` | `true` | — | `false` switches transcription off even with a key. |
 | `TRANSCRIPTION_PROVIDER`, `TRANSCRIPTION_MODEL` | automatic | Force `groq` or `openai`; change the model. | — |

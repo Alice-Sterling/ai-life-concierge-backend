@@ -92,6 +92,9 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       ['pro', 'PRO', user.id], log);
 
     log.info('stripe.user_upgraded', { integration: 'stripe', user_id: user.id });
+    // Remember which Stripe customer and subscription this client is, so a
+    // later pause or cancellation in WhatsApp changes the right one.
+    await require('../services/membership').rememberStripeIds(user.id, session, log);
     await events.record(events.EVENT.SUBSCRIPTION_UPGRADED, {
       userId: user.id, requestId: req.requestId, metadata: { tier: 'pro', source: 'stripe' },
     }, log);

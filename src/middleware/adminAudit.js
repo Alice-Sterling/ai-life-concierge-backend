@@ -48,6 +48,7 @@ const ACTIONS = [
   ['GET', /^\/inbox$/, 'inbox.read'],
   ['GET', /^\/tasks$/, 'tasks.list'],
   ['GET', /^\/audit$/, 'audit.read'],
+  ['GET', /^\/feedback$/, 'feedback.read'],
 ];
 
 function actionFor(method, path) {

@@ -47,7 +47,7 @@ Stripe activates a client.
 | **Approved** | Invited | The invitation with their personal onboarding link. A reminder after 24 hours if they have not onboarded. |
 | **Onboarded** | Form done, not yet paid | The "one final step" message (with the payment link when `PAYMENT_URL` is set). The desk is told what they asked. |
 | **Active** | A member | The welcome, once. Then **Alice**. |
-| **Inactive** | Membership lapsed | The inactive template. "Help" raises a task and an email for the desk. |
+| **Inactive** | Membership lapsed, or (P4) paused or cancelled by the client in WhatsApp | The inactive template. "Help" raises a task and an email for the desk. (P4) A **paused** member instead gets one line on how to come back, and RESUME switches them back on. |
 | **Denied** | Turned down | The denied template. |
 
 How a status changes:
@@ -104,7 +104,7 @@ its own switch (`feature-flags.md`) and is recorded so it is never sent twice.
 |---|---|---|
 | Batch sweeper | every 2 s | Answers bursts that have gone quiet. |
 | Human-mode resume | every 5 min (P4; 10 on `main`) | Hands clients back to Alice when the human window has passed. |
-| Lifecycle | every 15 min | Airtable → backend pull; onboarding reminder; 48-hour check-in; 4-hour nudge on unanswered options; weekly briefing; milestone, transit and travel pings (calendar-driven). |
+| Lifecycle | every 15 min | Airtable → backend pull; onboarding reminder; 48-hour check-in; 4-hour nudge on unanswered options; weekly briefing; milestone, transit and travel pings (calendar-driven); (P4) ending pauses that have run out; (P4) the day-14 feedback request. |
 | Date night | hourly, at :15 | Sends the date-night ping when a client's next date night is due (morning, their time). |
 | Legacy trial nudge | hourly | The old 30-day offer. Must stay off: see the warning in `feature-flags.md`. |
 

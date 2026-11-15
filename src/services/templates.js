@@ -192,6 +192,16 @@ const TEMPLATES = {
       + "Reply 'Ready' to review.",
   },
   // Plain text only: it goes out 4 hours after Alice's options, inside the window.
+  // Project 4: the day-14 request for a voice note (the brief's wording).
+  feedback_request: {
+    name: 'ailc_feedback_request_v1',
+    variables: (u) => ({ 1: firstName(u) }),
+    text: (u) =>
+      `${firstName(u)}, as one of our founding members, your perspective dictates how we build this. `
+      + "Drop me a quick WhatsApp voice note whenever you have a free minute. Tell me what's working, what "
+      + 'onboarding felt like, and what time-saving automations you actually value most. '
+      + '(Bonus points for brutal honesty!)',
+  },
   proposal_nudge: {
     name: null,
     variables: () => ({}),

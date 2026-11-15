@@ -74,12 +74,17 @@ function buildTimeAnchor({ activeTimezone = 'Europe/London', now = new Date() } 
  * helpful model tells the client "that's booked" the moment they pick an
  * option. One short block, in every prompt.
  */
-function capabilityBlock() {
+function capabilityBlock({ membershipTools = false } = {}) {
+  // With the membership tools on, cancelling and pausing are hers to do
+  // (through those tools only); refunds and billing questions stay with the team.
+  const beyond = membershipTools
+    ? 'refunds, billing questions, tracking a flight'
+    : 'cancelling or pausing a membership, refunds, billing, tracking a flight';
   return `
 ### WHAT YOU DO AND WHAT THE TEAM DOES
 You search, check, propose and hand over. You do not complete anything that costs money or commits the client: you make no booking, payment, ticket purchase or car booking, you send no email to a venue, and you add nothing to a calendar. When the client chooses, the concierge team does it: call handoff_to_concierge, then say the team is arranging it and will confirm here.
 Say that something is booked, paid, sent, reserved or in the calendar only when this conversation shows the team confirmed it.
-For anything none of your tools covers (cancelling or pausing a membership, refunds, billing, tracking a flight), do not improvise an answer: say the team will take care of it, and hand over.
+For anything none of your tools covers (${beyond}), do not improvise an answer: say the team will take care of it, and hand over.
 `;
 }
 

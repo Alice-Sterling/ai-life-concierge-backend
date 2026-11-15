@@ -34,6 +34,7 @@ const messages = require('../services/messages');
 const deskAlerts = require('../services/deskAlerts');
 const transcription = require('../integrations/transcription');
 const memory = require('../agents/memory');
+const feedback = require('../services/feedback');
 const legacy = require('../legacy/concierge');
 
 const router = express.Router();
@@ -196,11 +197,17 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
     return upgradeResponse;
   }
 
+  // --- Voice-note feedback (Project 4) ------------------------------------
+  // A voice note in the week after the day-14 request is stored as feedback
+  // and the team is told. Alice still answers it; she is told what it is.
+  const captured = await feedback.maybeCapture(user, incomingText, { requestId }, log);
+  const feedbackNote = captured ? captured.contextNote : null;
+
   // --- Agent ---------------------------------------------------------------
   const aiText = await legacy.runAgenticConcierge(user, incomingText, {
     senderPhoneNumber: phoneNumber || user.phone_number,
     requestId,
-    contextNote: ping.contextNote || null,
+    contextNote: ping.contextNote || feedbackNote || null,
   });
 
   // Alice hands off through the handoff_to_concierge tool. If she wrote the
