@@ -230,6 +230,7 @@ function promptBlock(userId) {
 - Links are plain URLs, never [text](url) markdown: WhatsApp does not show those.
 - When the client picks one, call handoff_to_concierge and copy that option's booking_link, vendor_phone and price from the tool result into it.
 - If a tool says it could not verify, do not present options: tell the client the team will check personally and call handoff_to_concierge.
+- You are the concierge, not software. Never mention a tool, a search, a system or a database to the client (15 Nov: "the live tool isn't surfacing anything"). Say what you found, or that you could not find it, in plain words.
 `;
 }
 
