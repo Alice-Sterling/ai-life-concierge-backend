@@ -8,6 +8,7 @@
 
 const { pool } = require('../db/pool');
 const { cleanPromptText, compactOneLine, isoOrNA } = require('./promptBuilder');
+const memory = require('./memory');
 
 const DEFAULT_NOISE_PHRASES = [
   "I've now connected my calendar and enabled my automations - please sync systems to activate.",
@@ -101,7 +102,13 @@ async function getChatHistory(userId, {
       LIMIT $2`,
     [userId, fetchLimit]
   );
-  return buildHistoryContext(result.rows, { windowMessages, summaryMessages, noisePhrases });
+  const context = buildHistoryContext(result.rows, { windowMessages, summaryMessages, noisePhrases });
+
+  // Long-term memory (Project 4): what conversations older than this window
+  // established about the client. It goes above the recent transcript in the
+  // system prompt; with no stored memory the block is empty.
+  context.memoryBlock = memory.formatBlock(await memory.getMemory(userId));
+  return context;
 }
 
 module.exports = {

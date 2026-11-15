@@ -32,6 +32,7 @@ const proactiveFlows = require('../services/proactiveFlows');
 const alarms = require('../services/alarms');
 const messages = require('../services/messages');
 const commandCenter = require('../services/commandCenter');
+const memory = require('../agents/memory');
 const adminAudit = require('../middleware/adminAudit');
 const db = require('../db/pool');
 const { config } = require('../config');
@@ -347,6 +348,9 @@ const TEST_JOBS = {
   transit: (log, opts) => proactiveFlows.runTransitPings(log, { userId: opts.userId, ignoreHour: true, ignoreWait: opts.ignoreWait }),
   // Flow 6: a multi-day trip in the next TRAVEL_DAYS_AHEAD days -> the travel ping.
   travel: (log, opts) => proactiveFlows.runTravelPings(log, { userId: opts.userId, ignoreHour: true, ignoreWait: opts.ignoreWait }),
+  // Long-term memory: summarise now whatever has left Alice's recent window,
+  // even a few messages, and whatever MEMORY_SUMMARY_ENABLED says. Sends nothing.
+  memory: (log, opts) => memory.refresh(opts.userId, { force: true }, log),
 };
 
 function testUser(req, res) {
@@ -389,7 +393,8 @@ router.post('/test/:userId/date-night-due', wrap(async (req, res) => {
 router.post('/test/:userId/run', wrap(async (req, res) => {
   const userId = testUser(req, res);
   if (!userId) return;
-  const jobs = req.body?.jobs ?? Object.keys(TEST_JOBS);
+  // "memory" only runs when asked for by name: it calls the Anthropic API.
+  const jobs = req.body?.jobs ?? Object.keys(TEST_JOBS).filter((j) => j !== 'memory');
   const unknown = [].concat(jobs).filter((j) => !TEST_JOBS[j]);
   if (unknown.length) {
     return res.status(400).json({
@@ -418,6 +423,7 @@ router.post('/test/:userId/run', wrap(async (req, res) => {
       transit_ping: config.lifecycle.transitPing,
       travel_ping: config.lifecycle.travelPing,
       agent_tools: config.agentTools.enabled,
+      memory_summary: config.memory.enabled,
     },
     results,
     request_id: req.requestId,

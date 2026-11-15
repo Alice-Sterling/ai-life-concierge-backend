@@ -33,6 +33,7 @@ const proactiveReplies = require('../services/proactiveReplies');
 const messages = require('../services/messages');
 const deskAlerts = require('../services/deskAlerts');
 const transcription = require('../integrations/transcription');
+const memory = require('../agents/memory');
 const legacy = require('../legacy/concierge');
 
 const router = express.Router();
@@ -242,6 +243,11 @@ async function runConversationFlow(user, incomingText, { phoneNumber, profileNam
   }
 
   await conversations.save(user.id, incomingText, replyBody, {}, log);
+
+  // Long-term memory: fold what has scrolled out of Alice's window into the
+  // client's summary. In the background, after the reply is decided, and only
+  // when MEMORY_SUMMARY_ENABLED is on.
+  memory.refreshSoon(user.id, log);
   return replyBody;
 }
 

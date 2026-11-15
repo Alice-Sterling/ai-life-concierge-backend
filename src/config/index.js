@@ -169,6 +169,16 @@ const config = {
     slackWebhookUrl: str('SLACK_WEBHOOK_URL'),
   },
 
+  // Alice's long-term memory (src/agents/memory.js). Reading a stored memory
+  // is always on. Writing one calls the Anthropic API after a reply, so it is
+  // off until switched on. The model defaults to the one Alice herself uses.
+  memory: {
+    enabled: bool('MEMORY_SUMMARY_ENABLED', false),
+    model: str('MEMORY_SUMMARY_MODEL', 'claude-sonnet-4-6'),
+    // How many messages must have left Alice's recent window before a refresh is worth a call.
+    minNewMessages: int('MEMORY_SUMMARY_MIN_MESSAGES', 6),
+  },
+
   // Voice notes -> text (src/integrations/transcription.js). Groq is used when
   // its key is set, else OpenAI. No key: voice notes behave as before.
   transcription: {

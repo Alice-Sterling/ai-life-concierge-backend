@@ -12,6 +12,7 @@ const db = require('../db/pool');
 const users = require('./users');
 const messages = require('./messages');
 const promptContext = require('./promptContext');
+const memory = require('../agents/memory');
 const twilio = require('../integrations/twilio');
 const { logger } = require('../lib/logger');
 
@@ -129,6 +130,8 @@ async function context(userId, log = logger) {
     lifestyle_preferences: promptContext.profileFacts({
       preferences: profileRow.preferences, active_automations: profileRow.active_automations,
     }),
+    // Alice's long-term memory of this client (null until one is written).
+    memory: await memory.getMemory(userId, log),
     recent_tasks: await recentTasks(userId, { limit: 3 }, log),
   };
 }
