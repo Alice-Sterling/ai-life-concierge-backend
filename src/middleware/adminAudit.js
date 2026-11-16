@@ -49,6 +49,10 @@ const ACTIONS = [
   ['GET', /^\/tasks$/, 'tasks.list'],
   ['GET', /^\/audit$/, 'audit.read'],
   ['GET', /^\/feedback$/, 'feedback.read'],
+  ['GET', /^\/desk\/members$/, 'desk.members.read'],
+  ['GET', /^\/desk\/members\/lookup$/, 'desk.members.lookup'],
+  ['POST', /^\/desk\/members$/, 'desk.members.save'],
+  ['POST', /^\/desk\/members\/remove$/, 'desk.members.remove'],
 ];
 
 function actionFor(method, path) {
@@ -87,6 +91,9 @@ function adminAudit() {
     res.on('finish', () => {
       if (req.method === 'OPTIONS') return;
       if (req.method === 'GET' && routePath === '/alarms') return;
+      // The dashboard's server function asks this on every call; one row per
+      // page refresh would bury everything else. Team CHANGES are recorded.
+      if (req.method === 'GET' && routePath === '/desk/members/lookup') return;
       const entry = {
         actor: req.admin?.actor || 'unauthenticated',
         route: `${req.method} ${mount}${routePath}`.slice(0, 255),

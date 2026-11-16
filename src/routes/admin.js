@@ -9,6 +9,10 @@
  *   POST /admin/users/:userId/mode     ai <-> human; (re)starts the human window
  *   POST /admin/messages/send          a human writes to a client; sets human mode
  *   GET  /admin/audit                  who called what (admin_audit_logs)
+ *   GET  /admin/desk/members           the Command Center team
+ *   GET  /admin/desk/members/lookup    ?email= -> that person's role (the dashboard's server function)
+ *   POST /admin/desk/members           { email, role } add a person or change their role
+ *   POST /admin/desk/members/remove    { email } take a person off the team
  *   POST /admin/calendar/connect       store a calendar OAuth handshake (called by n8n)
  *   POST /admin/users/:userId/calendar/disconnect  delete a client's stored calendar tokens
  *   POST /admin/users/status-changed   Airtable status changed -> template (called by n8n)
@@ -36,6 +40,7 @@ const commandCenter = require('../services/commandCenter');
 const memory = require('../agents/memory');
 const feedback = require('../services/feedback');
 const membership = require('../services/membership');
+const deskMembers = require('../services/deskMembers');
 const adminAudit = require('../middleware/adminAudit');
 const db = require('../db/pool');
 const { config } = require('../config');
@@ -174,6 +179,42 @@ router.post('/messages/send', wrap(async (req, res) => {
     if (!err.expose) throw err;
     res.status(err.status).json({ ok: false, error: err.message, code: err.code, request_id: req.requestId });
   }
+}));
+
+/**
+ * The Command Center team. Owners manage it from the dashboard; the
+ * dashboard's server function decides who is an owner (it asks lookup).
+ */
+const deskError = (res, req, err) => {
+  if (!err.expose) throw err;
+  res.status(err.status).json({ ok: false, error: err.message, code: err.code, request_id: req.requestId });
+};
+
+router.get('/desk/members', wrap(async (req, res) => {
+  const members = await deskMembers.list(req.log);
+  res.json({ count: members.length, members, roles: deskMembers.ROLES, request_id: req.requestId });
+}));
+
+router.get('/desk/members/lookup', wrap(async (req, res) => {
+  const member = await deskMembers.lookup(req.query.email, req.log);
+  res.json({ member, request_id: req.requestId });
+}));
+
+router.post('/desk/members', wrap(async (req, res) => {
+  try {
+    const out = await deskMembers.upsert({
+      email: req.body?.email, role: req.body?.role, addedBy: req.admin?.actor || null,
+    }, req.log);
+    res.json({ ok: true, ...out, request_id: req.requestId });
+  } catch (err) { deskError(res, req, err); }
+}));
+
+router.post('/desk/members/remove', wrap(async (req, res) => {
+  try {
+    const removed = await deskMembers.remove(req.body?.email, { by: req.admin?.actor || null }, req.log);
+    if (!removed) return res.status(404).json({ ok: false, error: 'That person is not on the team.', code: 'not_found', request_id: req.requestId });
+    res.json({ ok: true, removed: true, request_id: req.requestId });
+  } catch (err) { deskError(res, req, err); }
 }));
 
 /** What clients said in their feedback voice notes, newest first. Optional ?user_id=. */
