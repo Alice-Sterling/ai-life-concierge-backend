@@ -113,6 +113,16 @@ async function sendWhatsApp(to, body, log = logger, meta = {}) {
 }
 
 /**
+ * Send one file (image or PDF) with an optional caption, inside the same
+ * 24-hour window. Twilio downloads the file from mediaUrl when it sends, so the
+ * link must be reachable from the internet for at least that long.
+ * @returns {Promise<boolean>} whether Twilio accepted it
+ */
+async function sendWhatsAppMedia(to, body, mediaUrl, log = logger, meta = {}) {
+  return send(to, { ...(body ? { body } : {}), mediaUrl: [mediaUrl] }, log, meta);
+}
+
+/**
  * Send a Meta-approved template through the Content API. Works outside the
  * 24-hour window, which makes it the only way to start a conversation.
  *
@@ -147,4 +157,4 @@ async function healthCheck() {
   }
 }
 
-module.exports = { client, isConfigured, validateSignature, sendWhatsApp, sendTemplate, healthCheck };
+module.exports = { client, isConfigured, validateSignature, sendWhatsApp, sendWhatsAppMedia, sendTemplate, healthCheck };

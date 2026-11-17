@@ -285,10 +285,33 @@ const settle = () => new Promise((r) => setTimeout(r, 150));
   r = await post('/admin/messages/send', { user_id: 'nope', content: 'hi' });
   check('bad id -> 400', r.status, 400);
 
+  // A file from the desk: the link goes to Twilio as mediaUrl, the log keeps the path.
+  commandCenter._resetSends();
+  twilioSends.length = 0;
+  const FILE = 'https://abc.supabase.co/storage/v1/object/sign/cc-chat-files/x/menu.pdf?token=t';
+  r = await post('/admin/messages/send', {
+    user_id: tim.id, content: '', media_url: FILE, media_type: 'application/pdf', media_path: `${tim.id}/u-menu.pdf`, file_name: 'menu.pdf',
+  });
+  check('file without text -> 200', [r.status, r.body.ok, r.body.media_type, r.body.file_name], [200, true, 'application/pdf', 'menu.pdf']);
+  check('Twilio got the file link and no empty body', [twilioSends[0]?.mediaUrl, 'body' in (twilioSends[0] || {})], [[FILE], false]);
+  log = await rowsFor(tim.id);
+  const fileRow = log[log.length - 1];
+  check('logged with the file fields, not the signed link',
+    [fileRow.content, fileRow.metadata.media_type, fileRow.metadata.media_path, fileRow.metadata.file_name, JSON.stringify(fileRow.metadata).includes('token=')],
+    ['[File] menu.pdf', 'application/pdf', `${tim.id}/u-menu.pdf`, 'menu.pdf', false]);
+  r = await post('/admin/messages/send', { user_id: tim.id, content: 'The menu', media_url: FILE.replace('menu', 'menu2'), media_type: 'image/png', file_name: 'menu.png' });
+  check('file with a caption -> body and mediaUrl together', [r.status, twilioSends[1]?.body, twilioSends[1]?.mediaUrl?.length], [200, 'The menu', 1]);
+  r = await post('/admin/messages/send', { user_id: tim.id, content: '', media_url: 'http://plain.example.com/a.png', media_type: 'image/png' });
+  check('http link -> 400, nothing sent', [r.status, r.body.code, twilioSends.length], [400, 'bad_media_url', 2]);
+  r = await post('/admin/messages/send', { user_id: tim.id, content: '', media_url: FILE, media_type: 'video/mp4' });
+  check('video -> 400', [r.status, r.body.code], [400, 'bad_media_type']);
+  commandCenter._resetSends();
+
   const quiet = await addUser('Active', { first: 'Quiet' });
   await db.query(`INSERT INTO messages (user_id, direction, sender_type, content, created_at) VALUES ($1, 'inbound', 'user', 'old', NOW() - INTERVAL '30 hours')`, [quiet.id]);
+  const sendsBefore = twilioSends.length;
   r = await post('/admin/messages/send', { user_id: quiet.id, content: 'Are you still looking for a table?' });
-  check('outside the 24-hour window -> 409, nothing sent', [r.status, r.body.code, twilioSends.length], [409, 'outside_24h_window', 1]);
+  check('outside the 24-hour window -> 409, nothing sent', [r.status, r.body.code, twilioSends.length], [409, 'outside_24h_window', sendsBefore]);
   check('and the client stays with Alice', (await userRow(quiet.id)).conversation_mode, 'ai');
 
   const fresh = await addUser('Active', { first: 'Fresh' });

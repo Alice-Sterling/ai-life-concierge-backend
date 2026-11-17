@@ -159,20 +159,26 @@ router.get('/users/:userId/context', wrap(async (req, res) => {
 /**
  * A person on the desk sends a WhatsApp message.
  *
- *   { user_id, content }
+ *   { user_id, content, media_url?, media_type?, media_path?, file_name? }
  *
  * Logs it as 'human_agent', sends it through Twilio and puts the client in
  * human mode (Alice stays quiet until the human window ends or the client is
  * handed back). 409 outside_24h_window when WhatsApp would not deliver it.
+ * With media_url (https; JPG, PNG or PDF) the file goes too, and content may
+ * be empty.
  */
 router.post('/messages/send', wrap(async (req, res) => {
   const userId = req.body?.user_id ?? req.body?.userId;
   if (!UUID.test(String(userId || ''))) {
     return res.status(400).json({ error: 'user_id must be a UUID', request_id: req.requestId });
   }
+  const b = req.body || {};
+  const media = b.media_url
+    ? { url: b.media_url, type: b.media_type, path: b.media_path, name: b.file_name }
+    : null;
   try {
     const sent = await commandCenter.sendHumanMessage({
-      userId, content: req.body?.content ?? req.body?.message, actor: req.admin?.actor || 'admin', requestId: req.requestId,
+      userId, content: b.content ?? b.message, media, actor: req.admin?.actor || 'admin', requestId: req.requestId,
     }, req.log);
     res.json({ ok: true, ...sent, request_id: req.requestId });
   } catch (err) {

@@ -148,9 +148,10 @@ async function context(userId, log = logger) {
  *
  * @throws {Error} with .status and .code for the route to return
  */
-async function sendHumanMessage({ userId, content, actor = 'admin', requestId = null }, log = logger) {
+async function sendHumanMessage({ userId, content, media = null, actor = 'admin', requestId = null }, log = logger) {
   const text = String(content ?? '').trim();
-  if (!text) throw fail(400, 'empty_message', 'content is required');
+  const file = checkMedia(media);
+  if (!text && !file) throw fail(400, 'empty_message', 'content or a file is required');
   if (text.length > MAX_MESSAGE_CHARS) {
     throw fail(400, 'message_too_long', `content is ${text.length} characters; the limit is ${MAX_MESSAGE_CHARS}`);
   }
@@ -165,7 +166,7 @@ async function sendHumanMessage({ userId, content, actor = 'admin', requestId = 
       'The client has not written in the last 24 hours. WhatsApp only delivers an approved template now, not free text.');
   }
 
-  const key = `${userId}:${text}`;
+  const key = `${userId}:${text}:${file ? file.path || file.url : ''}`;
   const last = recentSends.get(key) || 0;
   if (Date.now() - last < DOUBLE_SEND_MS) {
     throw fail(409, 'duplicate_send', 'The same message was sent to this client a moment ago');
@@ -183,9 +184,20 @@ async function sendHumanMessage({ userId, content, actor = 'admin', requestId = 
     humanOverrideUntil = await users.extendHumanOverride(userId, log);
   }
 
-  const ok = await twilio.sendWhatsApp(user.phone_number, text, log, {
-    userId, senderType: 'human_agent', actor, requestId,
-  });
+  const meta = { userId, senderType: 'human_agent', actor, requestId };
+  const ok = file
+    ? await twilio.sendWhatsAppMedia(user.phone_number, text, file.url, log, {
+      ...meta,
+      // The log shows the file name when there is no text; the chat view reads
+      // the file from these fields (the signed URL itself expires, the path does not).
+      text: text || `[File] ${file.name || 'attachment'}`,
+      flags: {
+        media_type: file.type,
+        ...(file.path ? { media_path: file.path } : {}),
+        ...(file.name ? { file_name: file.name } : {}),
+      },
+    })
+    : await twilio.sendWhatsApp(user.phone_number, text, log, meta);
   if (!ok) {
     recentSends.delete(key);
     await messages.system(userId, `A message from ${actor} was not delivered: Twilio refused it.`,
@@ -193,17 +205,45 @@ async function sendHumanMessage({ userId, content, actor = 'admin', requestId = 
     throw fail(502, 'twilio_send_failed', 'Twilio refused the message. See the Twilio error log.');
   }
 
-  log.info('command_center.message_sent', { user_id: userId, actor, chars: text.length });
+  log.info('command_center.message_sent', {
+    user_id: userId, actor, chars: text.length, ...(file ? { media_type: file.type } : {}),
+  });
   return {
     user_id: userId,
     conversation_mode: 'human',
     human_override_until: humanOverrideUntil,
     content: text,
     sender_type: 'human_agent',
+    ...(file ? { media_type: file.type, media_path: file.path || null, file_name: file.name || null } : {}),
   };
 }
 
+/** File types WhatsApp takes from the desk (Twilio fetches the file from its URL). */
+const MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
+
+/**
+ * The file part of a desk message, checked: { url, type, path?, name? } or null.
+ * The URL must be https (Twilio downloads it at send time, so a short-lived
+ * signed link is enough); path and name are only kept for the chat view.
+ */
+function checkMedia(media) {
+  if (media == null || media === '') return null;
+  if (typeof media !== 'object') throw fail(400, 'bad_media', 'media must be an object');
+  const url = String(media.url ?? '').trim();
+  let parsed;
+  try { parsed = new URL(url); } catch { parsed = null; }
+  if (!parsed || parsed.protocol !== 'https:' || url.length > 2048) {
+    throw fail(400, 'bad_media_url', 'media_url must be an https link');
+  }
+  const type = String(media.type ?? '').trim().toLowerCase();
+  if (!MEDIA_TYPES.has(type)) {
+    throw fail(400, 'bad_media_type', 'Only JPG, PNG and PDF files can be sent');
+  }
+  const short = (v) => (v == null || v === '' ? null : String(v).slice(0, 300));
+  return { url, type, path: short(media.path), name: short(media.name) };
+}
+
 module.exports = {
-  MAX_MESSAGE_CHARS, taskLinks, recentTasks, headline, context, sendHumanMessage,
+  MAX_MESSAGE_CHARS, MEDIA_TYPES, taskLinks, recentTasks, headline, context, sendHumanMessage, checkMedia,
   _resetSends: () => recentSends.clear(),
 };
