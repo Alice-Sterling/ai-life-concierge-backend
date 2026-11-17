@@ -13,7 +13,7 @@
     "migrate:up": "node-pg-migrate up -m db/migrations",
     "migrate:down": "node-pg-migrate down -m db/migrations",
     "test:smoke": "node tests/smoke.cjs",
-    "test": "node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs && node tests/calendar.cjs && node tests/date-night.cjs && node tests/front-door.cjs && node tests/lifecycle.cjs && node tests/context.cjs && node tests/calendar-read.cjs && node tests/airtable-sync.cjs && node tests/agents/agent-modules.cjs && node tests/command-center.cjs && node tests/membership.cjs && node tests/desk-members.cjs && node tests/flows-unit.cjs",
+    "test": "node tests/twilio-signature.cjs && node tests/routes.cjs && node tests/timezone-crypto.cjs && node tests/batching.cjs && node tests/calendar.cjs && node tests/date-night.cjs && node tests/front-door.cjs && node tests/lifecycle.cjs && node tests/context.cjs && node tests/calendar-read.cjs && node tests/airtable-sync.cjs && node tests/agents/agent-modules.cjs && node tests/command-center.cjs && node tests/membership.cjs && node tests/desk-members.cjs && node tests/flows-unit.cjs",
     "start:legacy": "node index.js",
     "extract:legacy": "node scripts/extract-legacy.cjs",
     "db:apply": "node scripts/apply-sql.cjs",

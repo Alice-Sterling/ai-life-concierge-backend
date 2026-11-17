@@ -25,21 +25,31 @@ function isConfigured() {
  *
  * The URL must be reconstructed exactly as Twilio saw it. Railway terminates TLS
  * upstream, so req.protocol reports http and the signature will not match unless
- * X-Forwarded-Proto is honoured — hence PUBLIC_BASE_URL being preferred.
+ * X-Forwarded-Proto is honoured.
+ *
+ * The service answers on more than one domain (the Railway one and the custom
+ * ones), and PUBLIC_BASE_URL may name a different domain from the one Twilio's
+ * webhook is set to. So two URLs are tried: PUBLIC_BASE_URL + path, and the
+ * domain this request actually arrived on. Either one still needs a valid
+ * signature made with the auth token.
  */
+function signatureUrls(req) {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol).split(',')[0].trim();
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  const urls = [];
+  if (config.publicBaseUrl) urls.push(`${config.publicBaseUrl.replace(/\/$/, '')}${req.originalUrl}`);
+  if (host) urls.push(`${proto}://${host}${req.originalUrl}`);
+  return [...new Set(urls)];
+}
+
 function validateSignature(req) {
   if (!config.twilio.authToken) return false;
 
   const signature = req.get('x-twilio-signature');
   if (!signature) return false;
 
-  const proto = req.get('x-forwarded-proto') || req.protocol;
-  const host = req.get('x-forwarded-host') || req.get('host');
-  const url = config.publicBaseUrl
-    ? `${config.publicBaseUrl.replace(/\/$/, '')}${req.originalUrl}`
-    : `${proto}://${host}${req.originalUrl}`;
-
-  return twilio.validateRequest(config.twilio.authToken, signature, url, req.body || {});
+  return signatureUrls(req).some((url) =>
+    twilio.validateRequest(config.twilio.authToken, signature, url, req.body || {}));
 }
 
 // Both ends need the whatsapp: prefix. Twilio rejects a bare number with a
