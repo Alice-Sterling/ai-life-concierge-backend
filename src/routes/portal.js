@@ -55,12 +55,6 @@ router.get('/', (req, res) => {
       width: 100%;
       padding: 1.25rem 1rem 2rem;
     }
-    .natural-scene {
-      perspective: 1200px;
-      -webkit-perspective: 1200px;
-      transform-style: preserve-3d;
-      -webkit-transform-style: preserve-3d;
-    }
     .envelope-hit {
       cursor: pointer;
       outline: none;
@@ -76,33 +70,43 @@ router.get('/', (req, res) => {
       max-width: 380px;
       height: auto;
       overflow: visible;
-      transform-style: preserve-3d;
-      -webkit-transform-style: preserve-3d;
       filter: drop-shadow(0 14px 32px rgba(0, 0, 0, 0.8));
     }
     @media (min-width: 769px) {
       .natural-svg { width: min(340px, 42vw); }
     }
-    .natural-flap {
+
+    /* The envelope starts sealed. On click the closed flap folds up to the
+       crease (first half), the open flap unfolds above it (second half), then
+       the invitation card rises out of the envelope. */
+    .flap-closed,
+    .flap-open {
+      transform-box: view-box;
       transform-origin: 160px 118px;
-      transform: rotateX(0deg);
-      -webkit-transform: rotateX(0deg);
-      transition: transform 0.6s ease;
-      -webkit-transition: -webkit-transform 0.6s ease;
-      backface-visibility: hidden;
-      -webkit-backface-visibility: hidden;
+      -webkit-transform-origin: 160px 118px;
     }
-    .natural-root.opened .natural-flap {
-      transform: rotateX(180deg);
-      -webkit-transform: rotateX(180deg);
+    .flap-closed {
+      transform: scaleY(1);
+      transition: transform 0.3s ease-in;
     }
+    .flap-open {
+      transform: scaleY(0);
+      transition: transform 0.3s ease-out 0.3s;
+    }
+    .natural-root.opened .flap-closed { transform: scaleY(0); }
+    .natural-root.opened .flap-open { transform: scaleY(1); }
+
     .natural-letter {
       transform: translateY(0);
-      transition: transform 0.45s ease 0.3s;
+      transition: transform 0.6s cubic-bezier(0.22, 0.61, 0.36, 1) 0.55s;
     }
-    .natural-root.opened .natural-letter {
-      transform: translateY(-40px);
+    .natural-root.opened .natural-letter { transform: translateY(-92px); }
+
+    .natural-root:not(.opened) .envelope-hit:hover .natural-svg {
+      transform: translateY(-3px);
     }
+    .natural-svg { transition: transform 0.25s ease; }
+
     .footer-msg {
       margin-top: 2rem;
       text-align: center;
@@ -114,6 +118,7 @@ router.get('/', (req, res) => {
       color: #D4AF37;
       max-width: 24rem;
       padding: 0 0.5rem;
+      min-height: 4.35em;
       opacity: 1;
       transition: opacity 0.4s ease;
     }
@@ -121,47 +126,62 @@ router.get('/', (req, res) => {
       .footer-msg { font-size: 1.8rem; }
     }
     .footer-msg.switching { opacity: 0; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .flap-closed, .flap-open, .natural-letter, .natural-svg { transition: none; }
+    }
   </style>
 </head>
 <body>
   <div class="stage">
     <div class="natural-root" id="naturalRoot">
-      <div class="natural-scene">
-        <div class="envelope-hit" id="envelopeBtn" role="button" tabindex="0" aria-label="Open envelope — continue to WhatsApp">
-          <svg class="natural-svg" viewBox="0 0 320 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <defs>
-              <linearGradient id="natCharcoal" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" style="stop-color:#222"/>
-                <stop offset="100%" style="stop-color:#1a1a1a"/>
-              </linearGradient>
-              <linearGradient id="natSide" x1="0%" y1="100%" x2="100%" y2="0%">
-                <stop offset="0%" style="stop-color:#121212"/>
-                <stop offset="100%" style="stop-color:#1f1f1f"/>
-              </linearGradient>
-            </defs>
-            <rect width="320" height="260" fill="#000000"/>
-            <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.8" stroke-linejoin="round"
-              d="M32 118 L160 118 L288 118 L288 228 Q288 238 278 238 L42 238 Q32 238 32 228 Z"/>
-            <g class="natural-letter">
-              <rect x="78" y="148" width="164" height="76" rx="3" fill="#141414" stroke="#D4AF37" stroke-width="1.15"/>
-              <line x1="98" y1="168" x2="222" y2="168" stroke="#D4AF37" stroke-width="0.35" opacity="0.45"/>
-              <line x1="98" y1="182" x2="198" y2="182" stroke="#D4AF37" stroke-width="0.35" opacity="0.35"/>
-              <line x1="98" y1="196" x2="210" y2="196" stroke="#D4AF37" stroke-width="0.35" opacity="0.3"/>
-            </g>
-            <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
-              d="M32 118 L160 200 L32 228 Z"/>
-            <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
-              d="M288 118 L160 200 L288 228 Z"/>
-            <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.5" stroke-linejoin="round"
-              d="M32 228 L160 155 L288 228"/>
-            <g class="natural-flap">
-              <path fill="url(#natCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
-                d="M32 118 L160 38 L288 118 Z"/>
-              <path d="M32 118 L160 38 L288 118" fill="none" stroke="#D4AF37" stroke-width="0.85" opacity="0.4"/>
-              <line x1="160" y1="48" x2="160" y2="108" stroke="#D4AF37" stroke-width="0.5" opacity="0.25"/>
-            </g>
-          </svg>
-        </div>
+      <div class="envelope-hit" id="envelopeBtn" role="button" tabindex="0" aria-label="Open envelope — continue to WhatsApp">
+        <svg class="natural-svg" viewBox="0 0 320 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="natCharcoal" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#222"/>
+              <stop offset="100%" style="stop-color:#1a1a1a"/>
+            </linearGradient>
+            <linearGradient id="natSide" x1="0%" y1="100%" x2="100%" y2="0%">
+              <stop offset="0%" style="stop-color:#121212"/>
+              <stop offset="100%" style="stop-color:#1f1f1f"/>
+            </linearGradient>
+          </defs>
+
+          <!-- back of the envelope -->
+          <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.8" stroke-linejoin="round"
+            d="M32 118 L160 118 L288 118 L288 228 Q288 238 278 238 L42 238 Q32 238 32 228 Z"/>
+
+          <!-- open flap: behind the card, unfolds upwards from the crease -->
+          <g class="flap-open">
+            <path fill="url(#natCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
+              d="M32 118 L160 38 L288 118 Z"/>
+            <path d="M32 118 L160 38 L288 118" fill="none" stroke="#D4AF37" stroke-width="0.85" opacity="0.4"/>
+          </g>
+
+          <!-- the invitation card -->
+          <g class="natural-letter">
+            <rect x="78" y="148" width="164" height="76" rx="3" fill="#141414" stroke="#D4AF37" stroke-width="1.15"/>
+            <line x1="98" y1="168" x2="222" y2="168" stroke="#D4AF37" stroke-width="0.35" opacity="0.45"/>
+            <line x1="98" y1="182" x2="198" y2="182" stroke="#D4AF37" stroke-width="0.35" opacity="0.35"/>
+            <line x1="98" y1="196" x2="210" y2="196" stroke="#D4AF37" stroke-width="0.35" opacity="0.3"/>
+          </g>
+
+          <!-- front pockets -->
+          <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
+            d="M32 118 L160 200 L32 228 Z"/>
+          <path fill="url(#natSide)" stroke="#D4AF37" stroke-width="1.35" stroke-linejoin="round" opacity="0.95"
+            d="M288 118 L160 200 L288 228 Z"/>
+          <path fill="#1a1a1a" stroke="#D4AF37" stroke-width="1.5" stroke-linejoin="round"
+            d="M32 228 L160 155 L288 228"/>
+
+          <!-- closed flap: on top, seals the envelope until clicked -->
+          <g class="flap-closed">
+            <path fill="url(#natCharcoal)" stroke="#D4AF37" stroke-width="2" stroke-linejoin="round"
+              d="M32 118 L160 200 L288 118 Z"/>
+            <line x1="160" y1="128" x2="160" y2="190" stroke="#D4AF37" stroke-width="0.5" opacity="0.25"/>
+          </g>
+        </svg>
       </div>
     </div>
     <p class="footer-msg" id="naturalFooter">YOUR INVITATION TO ACTIVATE AI LIFE CONCIERGE</p>
@@ -191,7 +211,7 @@ router.get('/', (req, res) => {
           } catch (err) {
             window.location.assign(wa);
           }
-        }, 1100);
+        }, 1800);
       }
       btn.addEventListener('click', openNatural);
       btn.addEventListener('keydown', function (e) {
@@ -205,6 +225,5 @@ router.get('/', (req, res) => {
 </body>
 </html>`);
 });
-
 
 module.exports = router;
